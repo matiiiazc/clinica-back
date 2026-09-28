@@ -1,0 +1,37 @@
+# Entorno
+# El .env local NUNCA se commitea: tiene SECRET_KEY, JWT_SECRET y la clave de
+# la base. El .env.example si, y es la plantilla para el equipo.
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Django
+*.sqlite3
+db.sqlite3
+/staticfiles/
+/media/
+
+# Herramientas
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# Editores
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# SO
+.DS_Store
+Thumbs.db

@@ -1,0 +1,29 @@
+{% extends "accounts/email/base.html" %}
+
+{% block title %}Verificá tu email{% endblock %}
+
+{% block heading %}Confirmá tu email{% endblock %}
+
+{% block content %}
+<p>Hola{% if user.nombre %} {{ user.nombre }}{% endif %},</p>
+
+<p>Tu cuenta en {{ clinic }} ya está creada. Para activarla, ingresá este código:</p>
+
+<p style="font-size:32px;font-weight:bold;letter-spacing:8px;text-align:center;
+          margin:24px 0;padding:16px;background:#f4f4f5;border-radius:10px;
+          color:#111;">
+  {{ code }}
+</p>
+
+<p>El código vence en <strong>{{ ttl_minutes }} minutos</strong>.</p>
+
+<p>Si no te registraste vos, ignorá este mensaje.</p>
+
+<p style="margin-top:24px;">
+  <a href="{{ frontend_url }}/verificar?email={{ user.email|urlencode }}&amp;codigo={{ code }}"
+     style="display:inline-block;padding:12px 20px;background:#111;color:#fff;
+            text-decoration:none;border-radius:8px;">
+    Verificar mi email
+  </a>
+</p>
+{% endblock %}
