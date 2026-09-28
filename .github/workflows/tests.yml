@@ -1,0 +1,52 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: clinica_back
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Correr los tests
+        # El runner pone DEBUG=False, asi que se fuerza development para que
+        # validate_settings() no corte el arranque con las guardas de produccion.
+        env:
+          DEBUG: "true"
+          SECRET_KEY: clave-de-ci-que-no-importa-nada-1234567890
+          JWT_SECRET: otra-clave-distinta-para-el-ci-12345678901234
+          DB_NAME: clinica_back
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5432
+        run: python manage.py test apps --noinput
