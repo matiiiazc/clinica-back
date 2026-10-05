@@ -70,3 +70,14 @@ class Command(BaseCommand):
 
         if not options["password"]:
             self.stdout.write(self.style.WARNING(f"Contrasena temporal: {password}"))
+
+        if user.rol == Role.ADMIN:
+            # Aviso explicito: con rol admin se entra a la API, pero el admin de
+            # Django (/admin/) pide is_superuser. El comando no lo da porque
+            # superusuario es una decision del que despliega, no del script.
+            self.stdout.write(
+                self.style.WARNING(
+                    "Es admin de la API. Para entrar a /admin/ de Django hace "
+                    "falta superusuario: manage.py createsuperuser"
+                )
+            )
