@@ -82,6 +82,23 @@ class RegisterSerializer(serializers.Serializer):
     telefono = serializers.CharField(
         max_length=32, required=False, allow_blank=True
     )
+
+    # Ficha de salud. Obligatoria por decision del 2026-10-05: se pide siempre,
+    # sin opcion de mandarla vacia. Alergias y enfermedades cronicas no
+    # admiten cadena vacia a proposito; quien no tiene nada escribe "Ninguna".
+    ficha_alergias = serializers.CharField(
+        max_length=2000, trim_whitespace=True, allow_blank=False
+    )
+    ficha_enfermedades_cronicas = serializers.CharField(
+        max_length=2000, trim_whitespace=True, allow_blank=False
+    )
+    ficha_medicacion = serializers.CharField(
+        max_length=2000, required=False, allow_blank=True, default=""
+    )
+    ficha_observaciones = serializers.CharField(
+        max_length=2000, required=False, allow_blank=True, default=""
+    )
+
     password = serializers.CharField(
         write_only=True, style={"input_type": "password"}, trim_whitespace=False
     )
@@ -122,6 +139,13 @@ class RegisterSerializer(serializers.Serializer):
         nombre = validated_data.pop("nombre", "")
         telefono = validated_data.pop("telefono", "")
 
+        ficha = {
+            "alergias": validated_data.pop("ficha_alergias"),
+            "enfermedades_cronicas": validated_data.pop("ficha_enfermedades_cronicas"),
+            "medicacion": validated_data.pop("ficha_medicacion", ""),
+            "observaciones": validated_data.pop("ficha_observaciones", ""),
+        }
+
         # create_user() hashea con Argon2id y pone rol=paciente + email_verified=False.
         user = User.objects.create_user(
             email=email,
@@ -131,6 +155,13 @@ class RegisterSerializer(serializers.Serializer):
             rol=Role.PACIENTE,
             email_verified=False,
         )
+
+        # Import local a proposito: apps.clinica.models importa User desde aca,
+        # y traerlo en el tope del modulo cerraria el ciclo. El proyecto ya
+        # hace esto en validate_email con .exceptions.
+        from apps.clinica.models import FichaMedica
+
+        FichaMedica.objects.create(user=user, **ficha)
 
         _record, code = EmailVerificationCode.issue(user)
         # Sin SMTP configurado, send_verification_code devuelve el codigo en

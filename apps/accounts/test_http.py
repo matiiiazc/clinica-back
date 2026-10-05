@@ -68,6 +68,9 @@ class TestFlujoPorHttp(LiveServerTestCase):
                 "nombre": "Ana HTTP",
                 "password": PASSWORD,
                 "password_confirm": PASSWORD,
+                # Obligatoria desde el 2026-10-05.
+                "ficha_alergias": "Penicilina",
+                "ficha_enfermedades_cronicas": "Ninguna",
             },
         )
         self.assertEqual(status, 201, body)

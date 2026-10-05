@@ -45,6 +45,9 @@ INSTALLED_APPS = [
     # Terceros
     "rest_framework",
     "corsheaders",
+    # Necesario para ExclusionConstraint (no solapamiento de turnos) y para los
+    # rangos de ExclusionConstraint en apps.clinica.
+    "django.contrib.postgres",
     # Apps del proyecto
     "apps.accounts",
     "apps.clinica",
@@ -208,6 +211,13 @@ REST_FRAMEWORK = {
 DRF_THROTTLE_LOGIN = env_int("DRF_THROTTLE_LOGIN", default=10)
 DRF_THROTTLE_VERIFY = env_int("DRF_THROTTLE_VERIFY", default=10)
 DRF_THROTTLE_REGISTER = env_int("DRF_THROTTLE_REGISTER", default=5)
+
+# --- Turnos ---
+# Largo por defecto de un turno cuando la especialidad no define otro.
+TURNO_DURACION_MINUTOS = env_int("TURNO_DURACION_MINUTOS", default=30)
+# Granularidad de la grilla de horarios. Los slots libres se calculan en
+# multiplos de esto, asi que bajarlo a 10 da bloques de 10 minutos.
+TURNO_SLOT_MINUTOS = env_int("TURNO_SLOT_MINUTOS", default=15)
 
 # Internacionalización
 LANGUAGE_CODE = "es-ar"

@@ -50,6 +50,10 @@ def register_payload(**overrides):
         "telefono": "1122334455",
         "password": PASSWORD,
         "password_confirm": PASSWORD,
+        # La ficha de salud es obligatoria en el register desde el 2026-10-05.
+        # "Ninguna" es una respuesta valida: lo que no se permite es el silencio.
+        "ficha_alergias": "Ninguna",
+        "ficha_enfermedades_cronicas": "Ninguna",
     }
     data.update(overrides)
     return data
