@@ -266,6 +266,64 @@ class TestMedicos(BaseClinica):
         )
         self.assertEqual(response.status_code, 400)
 
+    def test_el_personal_puede_leer_la_agenda_de_un_profesional(self):
+        """
+        Regresion: el GET de la agenda se caia con 500.
+
+        `get_permissions` combinaba `IsStaffUser() | IsAdminUser()`, con las
+        clases ya instanciadas. El `|` de permisos de DRF funciona entre clases,
+        no entre objetos, asi que reventaba con TypeError en la primera llamada.
+        Como el unico test que tocaba la agenda era el POST (que va por otra
+        rama), nadie lo vio.
+        """
+        response = self.como(self.recepcion).get(
+            reverse("clinica:medico-agenda", args=[self.medico.id])
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()), len(self.medico.agendas.all()))
+
+    def test_el_medico_tambien_lee_una_agenda(self):
+        """El personal incluye al medico: por eso el permiso es `staff | admin`."""
+        response = self.como(self.medico_user).get(
+            reverse("clinica:medico-agenda", args=[self.medico.id])
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_el_paciente_no_lee_la_agenda_de_ningun_profesional(self):
+        response = self.como(self.paciente).get(
+            reverse("clinica:medico-agenda", args=[self.medico.id])
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_recepcion_carga_un_tramo_de_agenda(self):
+        response = self.como(self.recepcion).post(
+            reverse("clinica:medico-agenda", args=[self.medico.id]),
+            {"dia_semana": 4, "hora_inicio": "15:00", "hora_fin": "19:00"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+
+    def test_el_medico_no_carga_tramos_en_una_agenda(self):
+        """Alta es de recepcion: el medico solo cambia su estado."""
+        response = self.como(self.medico_user).post(
+            reverse("clinica:medico-agenda", args=[self.medico.id]),
+            {"dia_semana": 4, "hora_inicio": "15:00", "hora_fin": "19:00"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_recepcion_gestiona_bloqueos(self):
+        response = self.como(self.recepcion).get(
+            reverse("clinica:medico-bloqueos", args=[self.medico.id])
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_el_medico_no_gestiona_bloqueos(self):
+        response = self.como(self.medico_user).get(
+            reverse("clinica:medico-bloqueos", args=[self.medico.id])
+        )
+        self.assertEqual(response.status_code, 403)
+
 
 # ---------------------------------------------------------------------------
 # Disponibilidad y slots
@@ -370,6 +428,36 @@ class TestAsignacionDeTurnos(BaseClinica):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.json()["estado"], "pendiente")
         self.assertEqual(response.json()["duracion_minutos"], 30)
+
+    def test_paciente_id_viene_como_uuid_usable_en_la_url_de_la_ficha(self):
+        """
+        `paciente_id` tiene que viajar como el UUID, no como un entero.
+
+        El pk de User es UUID y `int(uuid)` no lanza error: devuelve el entero de
+        128 bits. Si el serializer lo deja pasar, el JSON lleva un numero de 39
+        digitos que el navegador no puede representar sin perder precision, y la
+        pantalla "ver ficha del paciente" manda una id que no matchea nunca.
+        """
+        response = self.como(self.recepcion).post(
+            reverse("clinica:turno-lista"),
+            {
+                "paciente": self.paciente.id,
+                "medico": self.medico.id,
+                "inicio": self.instante().isoformat(),
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+
+        id_recibido = response.json()["paciente_id"]
+        self.assertEqual(id_recibido, str(self.paciente.id))
+
+        # El round trip completo: la id que dio el listado tiene que servir para
+        # abrir la ficha.
+        ficha = self.como(self.medico_user).get(
+            reverse("clinica:paciente-ficha", args=[id_recibido])
+        )
+        self.assertEqual(ficha.status_code, 200)
 
     def test_recepcion_no_agenda_sobre_otro_turno(self):
         self.turno_valido()
@@ -1008,3 +1096,85 @@ class TestPanelResumen(BaseClinica):
         response = self.como(self.admin).get(reverse("clinica:panel-resumen"))
         self.assertEqual(response.json()["especialidades"], 2)
         self.assertEqual(response.json()["medicos"], 1)
+
+
+class TestBusquedaDePacientes(BaseClinica):
+    """
+    El buscador que usa recepcion para elegir a quien agendar un turno.
+    """
+
+    def test_recepcion_busca_por_nombre_o_email(self):
+        response = self.como(self.recepcion).get(
+            reverse("clinica:paciente-busqueda"), {"q": self.paciente.email.split("@")[0]}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()), 1)
+        self.assertEqual(response.json()[0]["id"], str(self.paciente.id))
+
+    def test_devuelve_el_uuid_que_acepta_el_alta_de_turno(self):
+        """
+        El id devuelto tiene que servir tal cual en `POST /api/turnos`.
+
+        Es el contrato entre el buscador y el alta: si uno devuelve el UUID y el
+        otro espera otra cosa, la pantalla no puede agendar sin intervening al
+        usuario.
+        """
+        encontrado = self.como(self.recepcion).get(
+            reverse("clinica:paciente-busqueda"), {"q": "paciente"}
+        ).json()[0]
+
+        response = self.como(self.recepcion).post(
+            reverse("clinica:turno-lista"),
+            {
+                "paciente": encontrado["id"],
+                "medico": self.medico.id,
+                "inicio": self.instante().isoformat(),
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+
+    def test_texto_muy_corto_no_devuelve_toda_la_base(self):
+        response = self.como(self.recepcion).get(reverse("clinica:paciente-busqueda"), {"q": "a"})
+        self.assertEqual(response.json(), [])
+
+    def test_paciente_no_busca_pacientes(self):
+        response = self.como(self.paciente).get(reverse("clinica:paciente-busqueda"), {"q": "pac"})
+        self.assertEqual(response.status_code, 403)
+
+    def test_el_medico_si_puede(self):
+        """
+        Los medicos son "staff" y pueden buscar.
+
+        Es la misma politica que ya aplica `MedicoAgendaView`: el profesional ve
+        la agenda de otro porque no filtra datos del paciente. Ver el listado de
+        pacientes es el mismo nivel de dato, y en el mostrador es quien
+        identifica a quien tiene el turno.
+        """
+        response = self.como(self.medico_user).get(
+            reverse("clinica:paciente-busqueda"), {"q": "pac"}
+        )
+        self.assertEqual(response.status_code, 200)
+
+
+class TestListadoDeUsuarios(BaseClinica):
+    """El listado de cuentas que muestra el panel del admin."""
+
+    def test_admin_ve_las_cuentas(self):
+        response = self.como(self.admin).get(reverse("auth-usuarios"))
+        self.assertEqual(response.status_code, 200)
+        emails = [u["email"] for u in response.json()]
+        self.assertIn(self.admin.email, emails)
+        self.assertIn(self.paciente.email, emails)
+
+    def test_filtra_por_rol(self):
+        response = self.como(self.admin).get(reverse("auth-usuarios"), {"rol": "medico"})
+        self.assertEqual([u["email"] for u in response.json()], [self.medico_user.email])
+
+    def test_rol_invalido_da_400(self):
+        response = self.como(self.admin).get(reverse("auth-usuarios"), {"rol": "jefe"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_recepcion_no_lista_usuarios(self):
+        response = self.como(self.recepcion).get(reverse("auth-usuarios"))
+        self.assertEqual(response.status_code, 403)

@@ -196,7 +196,12 @@ class TurnoSerializer(serializers.ModelSerializer):
     """Lectura de turno. Todo lo que la pantalla necesita, ya aplanado."""
 
     paciente = serializers.SerializerMethodField()
-    paciente_id = serializers.IntegerField(read_only=True)
+    # UUIDField y no IntegerField: el pk de User es un UUID, y `int(uuid)` no
+    # revienta, devuelve el entero de 128 bits del UUID. Serializado asi, el
+    # `paciente_id` que llega al front es un numero de 39 digitos que `JSON.parse`
+    # no puede representar sin perder precision, y la URL de la ficha
+    # (`/api/pacientes/<uuid>/ficha`) nunca matchearia.
+    paciente_id = serializers.UUIDField(read_only=True)
     medico_id = serializers.IntegerField(read_only=True)
     medico_nombre = serializers.SerializerMethodField()
     especialidad = serializers.CharField(source="especialidad.nombre", read_only=True)
@@ -356,7 +361,7 @@ class TurnoEstadoSerializer(serializers.Serializer):
 
 class ConsultaSerializer(serializers.ModelSerializer):
     paciente = serializers.SerializerMethodField()
-    paciente_id = serializers.IntegerField(read_only=True)
+    paciente_id = serializers.UUIDField(read_only=True)  # Ver TurnoSerializer.
     respondida_por = serializers.SerializerMethodField()
     esta_abierta = serializers.SerializerMethodField()
 
@@ -415,7 +420,7 @@ class ConsultaRespuestaSerializer(serializers.Serializer):
 
 class ColaEsperaSerializer(serializers.ModelSerializer):
     paciente = serializers.SerializerMethodField()
-    paciente_id = serializers.IntegerField(read_only=True)
+    paciente_id = serializers.UUIDField(read_only=True)  # Ver TurnoSerializer.
     especialidad = serializers.CharField(source="especialidad.nombre", read_only=True)
     especialidad_id = serializers.IntegerField(read_only=True)
     medico = serializers.SerializerMethodField()

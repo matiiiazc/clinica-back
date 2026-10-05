@@ -68,6 +68,9 @@ urlpatterns = [
     path("cola/<int:pk>/agendar", views.ColaAgendarView.as_view(), name="cola-agendar"),
     # --- Ficha medica ---
     path("ficha", views.MiFichaView.as_view(), name="ficha-mia"),
+    # Busqueda de pacientes: le devuelve a recepcion el UUID que necesita para
+    # `POST /api/turnos`.
+    path("pacientes", views.PacienteBusquedaView.as_view(), name="paciente-busqueda"),
     # `<uuid:...>` y no `<int:...>`: el User de accounts tiene UUID como primary
     # key. Un id numerico aca no matchearia nunca y daria 404 en todos lados.
     path(

@@ -265,9 +265,18 @@ class MedicoAgendaView(APIView):
     """
 
     def get_permissions(self):
+        """
+        El alta es de recepcion; la lectura, de todo el personal.
+
+        Se devuelven permisos ya instanciados porque este `get_permissions`
+        reemplaza al de DRF, que es el que normalmente los instancia. Por eso
+        aca no se puede escribir `IsStaffUser | IsAdminUser()`: el `|` de DRF
+        une **clases**, y con parentesis seria una instancia unida con otra.
+        Ademas `IsStaffUser` ya incluye a los administradores.
+        """
         if self.request.method == "POST":
             return [IsRecepcionOAdmin()]
-        return [IsStaffUser() | IsAdminUser()]
+        return [IsStaffUser()]
 
     def get(self, request, pk):
         medico = get_object_or_404(PerfilMedico, pk=pk)
@@ -851,6 +860,48 @@ class MiFichaView(APIView):
         serializer.is_valid(raise_exception=True)
         serializer.save(verificada_por=None, verificada_en=None)
         return Response(FichaMedicaSerializer(ficha).data)
+
+
+class PacienteBusquedaView(APIView):
+    """
+    Busqueda de pacientes para el personal.
+
+    Sin esto, `TurnoCreateSerializer` es inusable desde la pantalla: pide el
+    `paciente` por UUID y nadie en recepcion sabe de memoria un UUID. El buscador
+    devuelve justo el UUID que hay que mandar, asi que el front no lo inventa.
+
+    Devuelve solo lo que recepcion necesita para decidir a quien agendar: id,
+    nombre, email y si tiene el email verificado. No expone telefono ni nada de
+    salud: no hacen falta para esta pantalla y son datos que no tienen por que
+    viajar.
+    """
+
+    permission_classes = [IsStaffUser | IsAdminUser]
+
+    def get(self, request):
+        busqueda = request.query_params.get("q", "").strip()
+        if len(busqueda) < 2:
+            # Con menos de dos caracteres el `icontains` trae practicamente
+            # toda la base y la pantalla se vuelve inutilizable.
+            return Response([])
+
+        qs = (
+            User.objects.filter(rol=Role.PACIENTE)
+            .filter(Q(email__icontains=busqueda) | Q(nombre__icontains=busqueda))
+            .order_by("email")
+        )
+
+        return Response(
+            [
+                {
+                    "id": str(user.id),
+                    "nombre": user.get_full_name() or user.email,
+                    "email": user.email,
+                    "email_verificado": user.email_verified,
+                }
+                for user in qs[:20]
+            ]
+        )
 
 
 class PacienteFichaView(APIView):

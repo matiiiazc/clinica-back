@@ -22,6 +22,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth.models import update_last_login
+from django.db.models import Q
 from django.middleware.csrf import get_token
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
@@ -33,7 +34,8 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from .exceptions import ResendTooSoon
-from .models import EmailVerificationCode, User
+from .models import EmailVerificationCode, Role, User
+from .permissions import IsAdminUser
 from .serializers import (
     ChangePasswordSerializer,
     LoginSerializer,
@@ -303,6 +305,41 @@ class MeView(APIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(UserSerializer(request.user).data)
+
+
+class UsuarioListView(APIView):
+    """
+    GET /api/auth/usuarios: listado de cuentas para administracion.
+
+    Es lo que necesita el panel del admin para mostrar las cuentas que existen.
+    Sin el, el admin se loguea, ve el conteo del resumen y no tiene forma de
+    saber si las cuentas que le dijeron de crear estan efectivamente ahi.
+
+    Solo admin: es el listado de usuarios de la clinica, con emails y roles.
+    """
+
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        qs = User.objects.order_by("rol", "email")
+
+        rol = request.query_params.get("rol")
+        if rol:
+            if rol not in Role.values:
+                return Response(
+                    {"detail": f"Rol desconocido: {rol}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            qs = qs.filter(rol=rol)
+
+        busqueda = request.query_params.get("q", "").strip()
+        if busqueda:
+            # Icontains y no iexact: quien busca "juan" espera ver a "Juan".
+            qs = qs.filter(
+                Q(email__icontains=busqueda) | Q(nombre__icontains=busqueda)
+            )
+
+        return Response(UserSerializer(qs, many=True).data)
 
 
 class ChangePasswordView(APIView):

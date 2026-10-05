@@ -4,6 +4,12 @@ Fecha: 2026-10-05
 Alcance: columna *Por hacer* del tablero.
 Estado del análisis: verificado leyendo el código, no de memoria.
 
+> **Estado final: cerrado.** SCRUM-12, 13, 15 y 16 están implementados y
+> verificados. El cierre, con los números reales de tests y los comandos para
+> reproducirlos, está al final: [Estado final](#estado-final-del-sprint-2).
+> El resto del documento se conserva como está, porque las decisiones que se
+> tomaron ahí siguen siendo la razón de por qué el código es como es.
+
 ---
 
 ## Alcance del sprint
@@ -253,7 +259,7 @@ Definido por el usuario el 2026-10-05:
 
 `PerfilPaciente` (`apps/clinica/models.py:66`) tiene `documento`,
 `fecha_nacimiento`, `direccion` y `obra_social`. **No tiene un campo que lo
-vincule a un médico.** Hay dos formas de resolverlo y son设计和 distintos:
+vincule a un médico.** Hay dos formas de resolverlo y son distintas:
 
 - **Derivada** — "mis pacientes" = los que tienen al menos un turno conmigo.
   No requiere cambios de schema. El problema: un paciente que nunca agendó no
@@ -298,7 +304,7 @@ Si recepción solo va a *mirar* médicos y nada más, hay que corregirlo.
 
 ### 1. Estados: se conservan los del turno y se agregan los del médico
 
-Los5 estados de `Turno.Estado` quedan como estaban. Los estados
+Los 5 estados de `Turno.Estado` quedan como estaban. Los estados
 *libre / atendiendo / inactivo* son un campo nuevo `PerfilMedico.estado`, que
 reemplaza al booleano `activo` que existía antes. No se-convirtieron en estados
 de turno porque *libre* no describe un turno reservado: describe al profesional.
@@ -319,7 +325,7 @@ tener que tener ficha clínica cargada.
 Modelo `ColaEspera`. Decisiones tomadas:
 
 - **Se encola contra una especialidad, no contra un médico.** Quien espera
-  cardiología noeligió cardiólogo, y atarlo a uno deja la cola vacía en cuanto
+  cardiología no eligió cardiólogo, y atarlo a uno deja la cola vacía en cuanto
   ese médico no tenga hueco. El campo `medico` existe pero es opcional, para
   cuando el paciente sí pide uno en particular.
 - **`prioridad` es un entero** (`NORMAL=0`, `URGENTE=10`), no un texto. El orden
@@ -351,10 +357,87 @@ Modelo `ColaEspera`. Decisiones tomadas:
 ### Sigue pendiente de definir
 
 **La ficha médica del paciente.** El paciente tiene que poder ver y modificar su
-historial y su ficha de salud (afecciones, Etc.), y se pide **desde el register**.
+historial y su ficha de salud (afecciones, etc.), y se pide **desde el register**.
 No existe el modelo.
 
 Hace falta decidir si lo que carga el paciente queda marcado como *no verificado*
 hasta que un profesional lo confirme. La pregunta se hizo y quedó sin responder:
 si el paciente puede cambiar sus alergias en cualquier momento, un médico puede
 atender con un dato que nadie revisó.
+
+---
+
+## Estado final del sprint 2
+
+Fecha de cierre: 2026-10-05. Todo lo de arriba quedó implementado.
+
+### Lo que hay ahora
+
+**`apps/clinica` — API completa.** 9 modelos, 23 endpoints bajo `/api/`,
+serializers con validación de negocio, permisos por rol, servicios de
+disponibilidad/agenda/bloqueos. En el admin están registrados los 6 que
+interesan operar a mano (los otros 3 son técnicos o se manejan desde un flujo).
+
+**`apps/accounts` — 1 endpoint más.** `GET /api/auth/usuarios` (solo admin,
+filtra por `rol` y busca por `q`), que es lo que permite ver las cuentas desde
+el panel de administración.
+
+**Front — 4 paneles.** `Main.tsx` lee `usuario.rol` y despacha a
+`PanelAdmin`, `PanelRecepcion`, `PanelMedico` o `PanelPaciente`. Cada uno con
+sus secciones sobre los componentes de `components/ui.tsx`.
+
+### Números
+
+| Qué | Resultado | Cómo se comprueba |
+|---|---|---|
+| Tests del backend | **159 OK** | `python manage.py test apps --noinput` |
+| Typecheck del front | Sin errores | `npm run typecheck` |
+| Lint del front | 0 errores, 0 warnings | `npm run lint` |
+| Build del front | OK | `npm run build` |
+| Paneles contra el back real | **39/39 OK** | `npm run verificar:paneles` |
+
+`npm run verificar:paneles` es lo más útil de los dos repositorios juntos: no
+mockea nada, entra por la API con los cuatro roles y camina lo que hace cada
+uno. Sabe detectar un endpoint caído o un permiso mal puesto.
+
+### Datos de demostración
+
+Los paneles se veían vacíos sin contenido. `datos_demo` lo resuelve:
+
+```
+python manage.py datos_demo          # muestra el plan, no escribe
+python manage.py datos_demo --si     # escribe
+```
+
+Crea 4 especialidades, 4 profesionales con agenda, 4 pacientes con ficha, turnos
+de esta semana y de la que viene, 2 consultas y 2 entradas de cola. Todo con la
+contraseña `Clinica2026!Demo`. Es idempotente: correrlo dos veces no duplica.
+
+### Bugs que aparecieron al verificar de punta a punta
+
+Estos no los veían los tests, y conviene recordarlos:
+
+1. **`paciente_id` como entero en tres serializers.** `User.id` es UUID, así que
+   `TurnoSerializer`, `ConsultaSerializer` y `ColaEsperaSerializer` mandaban un
+   id que no matcheaba ninguna URL. Ahora usan `serializers.UUIDField`.
+   Hay un test de round-trip que sube por `/api/pacientes/<uuid>/ficha`.
+
+2. **`get_permissions` sobreescrito devolviendo permisos sin instanciar.** En
+   `MedicoAgendaView` estaba `IsStaffUser() | IsAdminUser()`, que tira
+   `TypeError` → 500 en cada llamada al GET de la agenda. El POST pasaba porque
+   va por otra rama del método, así que ningún test lo tocaba. Ahora hay siete
+   tests sobre esa vista.
+
+3. **`IsStaffUser | IsAdminUser` sobra en varios `permission_classes`.**
+   `IsStaffUser` ya incluye a los administradores, así que la combinación es
+   redundante. No es un bug, queda como nota.
+
+### Lo que sigue pendiente
+
+- **SMTP.** El registro sigue mostrando `dev_code` en consola. Es el único
+  bloqueo externo que queda de SCRUM-14.
+- **Sin tests automatizados en el front.** La verificación es manual o con el
+  script de `verificar:paneles`.
+- **Neón.** Sigue sin decidirse si reemplaza la base local, y la credencial que
+  se compartió en el chat hay que rotarla antes de publicar el proyecto.
+- **`README.md` borrado.** No se recrea salvo que se pida.
