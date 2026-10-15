@@ -1,0 +1,173 @@
+clinic-management/
+│
+├── backend/
+│   │
+│   ├── manage.py
+│   │
+│   ├── config/
+│   │   ├── __init__.py
+│   │   │
+│   │   ├── settings/
+│   │   │   ├── __init__.py
+│   │   │   ├── base.py
+│   │   │   ├── development.py
+│   │   │   └── production.py
+│   │   │
+│   │   ├── urls.py
+│   │   ├── asgi.py
+│   │   └── wsgi.py
+│   │
+│   ├── apps/
+│   │   │
+│   │   ├── accounts/
+│   │   │   ├── migrations/
+│   │   │   │   └── __init__.py
+│   │   │   ├── __init__.py
+│   │   │   ├── admin.py
+│   │   │   ├── apps.py
+│   │   │   ├── models.py
+│   │   │   ├── serializers.py
+│   │   │   ├── views.py
+│   │   │   ├── urls.py
+│   │   │   ├── permissions.py
+│   │   │   └── tests.py
+│   │   │
+│   │   ├── patients/
+│   │   │   ├── migrations/
+│   │   │   ├── __init__.py
+│   │   │   ├── admin.py
+│   │   │   ├── apps.py
+│   │   │   ├── models.py
+│   │   │   ├── serializers.py
+│   │   │   ├── views.py
+│   │   │   ├── urls.py
+│   │   │   ├── permissions.py
+│   │   │   └── tests.py
+│   │   │
+│   │   ├── doctors/
+│   │   │   ├── migrations/
+│   │   │   ├── __init__.py
+│   │   │   ├── admin.py
+│   │   │   ├── apps.py
+│   │   │   ├── models.py
+│   │   │   ├── serializers.py
+│   │   │   ├── views.py
+│   │   │   ├── urls.py
+│   │   │   ├── permissions.py
+│   │   │   └── tests.py
+│   │   │
+│   │   ├── specialties/
+│   │   │   ├── migrations/
+│   │   │   ├── __init__.py
+│   │   │   ├── admin.py
+│   │   │   ├── apps.py
+│   │   │   ├── models.py
+│   │   │   ├── serializers.py
+│   │   │   ├── views.py
+│   │   │   ├── urls.py
+│   │   │   └── tests.py
+│   │   │
+│   │   ├── appointments/
+│   │   │   ├── migrations/
+│   │   │   ├── __init__.py
+│   │   │   ├── admin.py
+│   │   │   ├── apps.py
+│   │   │   ├── models.py
+│   │   │   ├── serializers.py
+│   │   │   ├── views.py
+│   │   │   ├── urls.py
+│   │   │   ├── permissions.py
+│   │   │   ├── services.py
+│   │   │   └── tests.py
+│   │   │
+│   │   ├── medical_records/
+│   │   │   ├── migrations/
+│   │   │   ├── __init__.py
+│   │   │   ├── admin.py
+│   │   │   ├── apps.py
+│   │   │   ├── models.py
+│   │   │   ├── serializers.py
+│   │   │   ├── views.py
+│   │   │   ├── urls.py
+│   │   │   ├── permissions.py
+│   │   │   └── tests.py
+│   │   │
+│   │   ├── notifications/
+│   │   │   ├── migrations/
+│   │   │   ├── __init__.py
+│   │   │   ├── admin.py
+│   │   │   ├── apps.py
+│   │   │   ├── models.py
+│   │   │   ├── serializers.py
+│   │   │   ├── views.py
+│   │   │   ├── urls.py
+│   │   │   └── tests.py
+│   │   │
+│   │   └── audit/
+│   │       ├── migrations/
+│   │       ├── __init__.py
+│   │       ├── admin.py
+│   │       ├── apps.py
+│   │       ├── models.py
+│   │       ├── services.py
+│   │       └── tests.py
+│   │
+│   ├── common/
+│   │   ├── __init__.py
+│   │   ├── exceptions.py
+│   │   ├── pagination.py
+│   │   ├── permissions.py
+│   │   ├── responses.py
+│   │   ├── validators.py
+│   │   └── utils.py
+│   │
+│   ├── api/
+│   │   ├── __init__.py
+│   │   └── urls.py
+│   │
+│   ├── tests/
+│   │   ├── __init__.py
+│   │   ├── test_auth.py
+│   │   ├── test_patients.py
+│   │   ├── test_doctors.py
+│   │   ├── test_appointments.py
+│   │   └── test_medical_records.py
+│   │
+│   ├── requirements/
+│   │   ├── base.txt
+│   │   ├── development.txt
+│   │   └── production.txt
+│   │
+│   ├── .env
+│   ├── .env.example
+│   ├── Dockerfile
+│   └── requirements.txt
+│
+├── frontend/
+│   │
+│   ├── src/
+│   │   ├── components/
+│   │   ├── pages/
+│   │   ├── layouts/
+│   │   ├── hooks/
+│   │   ├── services/
+│   │   ├── types/
+│   │   ├── utils/
+│   │   ├── context/
+│   │   └── App.tsx
+│   │
+│   ├── public/
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── vite.config.ts
+│   └── ...
+│
+├── docker-compose.yml
+├── .gitignore
+├── .env.example
+├── README.md
+└── docs/
+    ├── architecture/
+    ├── api/
+    ├── database/
+    └── decisions/
