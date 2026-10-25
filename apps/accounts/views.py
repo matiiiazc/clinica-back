@@ -12,9 +12,8 @@ Endpoints (todos bajo /api/auth):
   PATCH /me            actualiza nombre / telefono
   POST /change-password
 
-Los tokens van en dos lugares a la vez: en el body de la respuesta y en cookies
-HttpOnly. El body para SPAs que los guardan en memoria, la cookie para que el
-refresh sobreviva a recargar la pagina sin exponer el token a un XSS.
+El access token se devuelve en el body para que la SPA lo conserve en memoria.
+El refresh solo va en una cookie HttpOnly, para que no quede accesible al JavaScript.
 """
 
 import logging
@@ -22,6 +21,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth.models import update_last_login
+from django.db import transaction
 from django.db.models import Q
 from django.middleware.csrf import get_token
 from django.utils import timezone
@@ -63,6 +63,7 @@ def issue_tokens(user, remember_me=False):
     """
     refresh = RefreshToken.for_user(user)
 
+    refresh["remember_me"] = bool(remember_me)
     if remember_me:
         refresh.set_exp(lifetime=timedelta(days=settings.REFRESH_TOKEN_DAYS_REMEMBER))
 
@@ -73,7 +74,7 @@ def issue_tokens(user, remember_me=False):
 
 
 def set_auth_cookies(response, tokens, remember_me=False):
-    """Deja el access en `..._access` y el refresh en `..._refresh`."""
+    """Deja el access y el refresh en cookies HttpOnly."""
     access_max_age = int(settings.SIMPLE_JWT["ACCESS_TOKEN_LIFETIME"].total_seconds())
     refresh_max_age = int(settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"].total_seconds())
     if remember_me:
@@ -98,7 +99,6 @@ def set_auth_cookies(response, tokens, remember_me=False):
         path="/",
     )
 
-
 def clear_auth_cookies(response):
     response.delete_cookie(
         settings.AUTH_COOKIE + "_access",
@@ -116,7 +116,7 @@ def session_payload(user, tokens, extra=None):
     """Respuesta canonica de login / refresh / verify."""
     payload = {
         "user": UserSerializer(user).data,
-        "tokens": tokens,
+        "tokens": {"access": tokens["access"]},
     }
     if extra:
         payload.update(extra)
@@ -233,20 +233,13 @@ class LoginView(APIView):
 
 
 class RefreshView(APIView):
-    """
-    POST /api/auth/refresh.
-
-    Acepta el refresh en el body o en la cookie `..._refresh` y devuelve un
-    access nuevo. Como ROTATE_REFRESH_TOKENS esta activo, cada refresh rota el
-    token: hay que usar siempre el ultimo.
-    """
+    """Renueva el access token y rota el refresh guardado en cookie HttpOnly."""
 
     permission_classes = [AllowAny]
+    authentication_classes = []
 
     def post(self, request):
-        raw = request.data.get("refresh") or request.COOKIES.get(
-            settings.AUTH_COOKIE + "_refresh"
-        )
+        raw = request.COOKIES.get(settings.AUTH_COOKIE + "_refresh")
         if not raw:
             return Response(
                 {"code": "no_refresh_token", "detail": "Falta el refresh token."},
@@ -269,26 +262,49 @@ class RefreshView(APIView):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
-        tokens = {
-            "access": str(refresh.access_token),
-            "refresh": str(refresh),
-        }
-        response = Response({"user": UserSerializer(user).data, "tokens": tokens})
-        set_auth_cookies(response, tokens)
+        remember_me = bool(refresh.get("remember_me", False))
+        try:
+            with transaction.atomic():
+                refresh.blacklist()
+                siguiente = RefreshToken.for_user(user)
+                siguiente["remember_me"] = remember_me
+                if remember_me:
+                    siguiente.set_exp(
+                        lifetime=timedelta(days=settings.REFRESH_TOKEN_DAYS_REMEMBER)
+                    )
+                tokens = {
+                    "access": str(siguiente.access_token),
+                    "refresh": str(siguiente),
+                }
+        except TokenError:
+            return Response(
+                {"code": "invalid_refresh", "detail": "Refresh token invalido."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        response = Response(session_payload(user, tokens))
+        set_auth_cookies(response, tokens, remember_me=remember_me)
         response["X-CSRFToken"] = get_token(request)
         return response
 
 
 class LogoutView(APIView):
-    """POST /api/auth/logout. No invalida el token, solo limpia las cookies."""
+    """POST /api/auth/logout. Revoca el refresh y limpia las cookies."""
 
     permission_classes = [AllowAny]
+    authentication_classes = []
 
     def post(self, request):
+        raw = request.COOKIES.get(settings.AUTH_COOKIE + "_refresh")
+        if raw:
+            try:
+                RefreshToken(raw).blacklist()
+            except TokenError:
+                # La sesión ya venció o fue revocada; igual se limpian las cookies.
+                pass
         response = Response({"message": "Sesion cerrada."})
         clear_auth_cookies(response)
         return response
-
 
 class MeView(APIView):
     """GET /api/auth/me y PATCH /api/auth/me."""

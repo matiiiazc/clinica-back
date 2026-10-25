@@ -20,10 +20,12 @@ otro.
 
 from datetime import datetime, timedelta
 
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
+from rest_framework.exceptions import ValidationError
 from rest_framework.generics import ListAPIView
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -41,6 +43,7 @@ from .models import (
     FichaMedica,
     PerfilMedico,
     Turno,
+    Urgencia,
 )
 from .permissions import (
     IsMedico,
@@ -68,6 +71,11 @@ from .serializers import (
     TurnoEstadoSerializer,
     TurnoSerializer,
     TurnoSolicitarSerializer,
+    UrgenciaCreateSerializer,
+    ValidarDisponibilidadSerializer,
+    UrgenciaDerivarSerializer,
+    UrgenciaEstadoSerializer,
+    UrgenciaSerializer,
 )
 
 
@@ -361,17 +369,84 @@ class DisponibilidadView(APIView):
         resultados = []
         for medico in medicos:
             slots = services.slots_libres(medico, fecha)
+
+            # Lo que ocupa el dia, para que la pantalla pueda mostrar "ocupado"
+            # y no solo esconder el horario de la lista de libres.
+            # `localtime` porque la base devuelve UTC: sin esto, el mismo turno
+            # de las 10:00 aparece como 13:00 en la lista de ocupados, mientras
+            # los libres vienen en hora local.
+            ocupados = [
+                {
+                    "inicio": timezone.localtime(inicio).isoformat(),
+                    "fin": timezone.localtime(fin).isoformat(),
+                }
+                for inicio, fin in services.rangos_ocupados(medico, fecha)
+            ]
+
+            # Tramos de atencion del dia pedido: la pantalla de medicos
+            # disponibles tiene que poder mostrar *cuando* atiende cada uno.
+            agenda = [
+                {
+                    "dia_semana": tramo.dia_semana,
+                    "hora_inicio": tramo.hora_inicio.strftime("%H:%M"),
+                    "hora_fin": tramo.hora_fin.strftime("%H:%M"),
+                }
+                for tramo in medico.agendas.filter(
+                    activo=True, dia_semana=fecha.weekday()
+                )
+            ]
+
             resultados.append(
                 {
                     "medico_id": medico.id,
                     "medico": medico.user.get_full_name() or medico.user.email,
                     "especialidad": medico.especialidad.nombre,
                     "duracion_minutos": services.duracion_de(medico),
+                    "agenda": agenda,
                     "horarios": [s.isoformat() for s in slots],
+                    "horarios_ocupados": ocupados,
                 }
             )
 
         return Response({"fecha": fecha_cruda, "medicos": resultados})
+
+
+class DisponibilidadValidarView(APIView):
+    """
+    Pre-chequeo antes de reservar.
+
+    Devuelve `disponible` y, si no, el motivo en texto. La reserva real vuelve a
+    validar (y la base tiene el `ExclusionConstraint`), pero esto permite que la
+    pantalla avise "ese horario ya esta ocupado" sin intentar crear el turno.
+    """
+
+    permission_classes = [IsStaffUser | IsPatient | IsAdminUser]
+
+    def get(self, request):
+        serializer = ValidarDisponibilidadSerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        medico = serializer.validated_data["medico"]
+        inicio = serializer.validated_data["inicio"]
+        duracion = services.duracion_de(medico)
+        fin = inicio + timedelta(minutes=duracion)
+
+        # El pasado se rechaza antes que nada: `motivo_de_rechazo` asumiria que
+        # el horario es reservable y devolveria "fuera de agenda", que confunde.
+        if inicio <= timezone.localtime():
+            motivo = "El horario tiene que ser futuro."
+        else:
+            motivo = services.motivo_de_rechazo(medico, inicio, fin)
+
+        return Response(
+            {
+                "disponible": motivo is None,
+                "motivo": motivo,
+                "medico_id": medico.id,
+                "inicio": timezone.localtime(inicio).isoformat(),
+                "fin": timezone.localtime(fin).isoformat(),
+                "duracion_minutos": duracion,
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -696,32 +771,60 @@ class ColaListView(ListAPIView):
 
         if user.rol == Role.PACIENTE and not user.is_superuser:
             qs = qs.filter(paciente=user)
-        elif self.request.query_params.get("estado"):
+        if self.request.query_params.get("estado"):
             qs = qs.filter(estado=self.request.query_params["estado"])
 
         return qs
 
     def post(self, request):
+        user = request.user
+        es_staff = user.is_superuser or user.rol in {Role.RECEPCION, Role.ADMIN}
+
+        if not es_staff and ("paciente" in request.data or "prioridad" in request.data):
+            return Response(
+                {"detalle": "Los pacientes no pueden asignar prioridades ni anotar a otra persona."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         serializer = ColaEsperaCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-
-        # El unico duplicado que importa es el vivo: el constraint parcial de la
-        # base cubre el caso, pero sin esto el paciente recibe un 500 en vez de
-        # un mensaje que dice que ya esta en la cola.
-        ya_esta = ColaEspera.objects.filter(
-            paciente=request.user,
-            especialidad=serializer.validated_data["especialidad"],
-            estado=ColaEspera.Estado.ESPERANDO,
-        ).exists()
-        if ya_esta:
+        datos = serializer.validated_data
+        paciente = datos.get("paciente") if es_staff else user
+        if paciente is None:
             return Response(
-                {"detalle": "Ya estas en la cola de espera de esa especialidad."},
+                {"paciente": ["Elegí el paciente de la urgencia."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # El constraint parcial de la base protege también dos altas simultáneas;
+        # traducimos ese conflicto esperado a 409 en vez de dejar que sea un 500.
+        qs = ColaEspera.objects.filter(
+            paciente=paciente,
+            especialidad=datos["especialidad"],
+            estado=ColaEspera.Estado.ESPERANDO,
+        )
+        if qs.exists():
+            return Response(
+                {"detalle": "Ya existe una entrada esperando para ese paciente y especialidad."},
                 status=status.HTTP_409_CONFLICT,
             )
 
-        serializer.save(paciente=request.user)
+        prioridad = datos.get("prioridad", ColaEspera.Prioridad.NORMAL)
+        try:
+            with transaction.atomic():
+                entrada = serializer.save(
+                    paciente=paciente,
+                    prioridad=prioridad,
+                    nota=(datos.get("nota") or "").strip(),
+                )
+        except IntegrityError:
+            return Response(
+                {"detalle": "Ya existe una entrada esperando para ese paciente y especialidad."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
         return Response(
-            ColaEsperaSerializer(serializer.instance).data, status=status.HTTP_201_CREATED
+            ColaEsperaSerializer(entrada).data, status=status.HTTP_201_CREATED
         )
 
 
@@ -919,11 +1022,12 @@ class PacienteFichaView(APIView):
     def get(self, request, user_id):
         paciente = get_object_or_404(User, pk=user_id, rol=Role.PACIENTE)
 
-        if (
-            request.user.rol == Role.MEDICO
-            and not request.user.is_superuser
-            and request.query_params.get("solo_mis_pacientes") == "1"
-        ):
+        ficha = get_object_or_404(FichaMedica, user=paciente)
+
+        # La ficha contiene datos de salud. La relación médico-paciente es una
+        # condición obligatoria de autorización, nunca un filtro opcional que el
+        # cliente pueda omitir.
+        if request.user.rol == Role.MEDICO and not request.user.is_superuser:
             tiene_turno = Turno.objects.filter(
                 medico__user=request.user, paciente=paciente
             ).exists()
@@ -933,19 +1037,28 @@ class PacienteFichaView(APIView):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
-        self.check_object_permissions(request, paciente.ficha_medica)
-        ficha = get_object_or_404(FichaMedica, user=paciente)
+        self.check_object_permissions(request, ficha)
         return Response(FichaMedicaLecturaSerializer(ficha).data)
 
     def post(self, request, user_id):
         """El profesional verifica la ficha."""
-        ficha = get_object_or_404(FichaMedica, user_id=user_id)
-
         if request.user.rol not in {Role.MEDICO, Role.ADMIN} and not request.user.is_superuser:
             return Response(
                 {"detalle": "Solo un medico o administrador puede verificar una ficha."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+
+        paciente = get_object_or_404(User, pk=user_id, rol=Role.PACIENTE)
+        ficha = get_object_or_404(FichaMedica, user=paciente)
+        if request.user.rol == Role.MEDICO and not request.user.is_superuser:
+            tiene_turno = Turno.objects.filter(
+                medico__user=request.user, paciente=paciente
+            ).exists()
+            if not tiene_turno:
+                return Response(
+                    {"detalle": "Ese paciente no tiene turnos con vos."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
 
         serializer = FichaMedicaVerificarSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -958,6 +1071,226 @@ class PacienteFichaView(APIView):
         data = FichaMedicaLecturaSerializer(ficha).data
         data["nota_verificacion"] = nota
         return Response(data)
+
+
+# ---------------------------------------------------------------------------
+# Urgencias
+# ---------------------------------------------------------------------------
+
+
+class UrgenciaListView(ListAPIView):
+    """
+    Guardia: registro y listado de urgencias.
+
+    Paciente: ve y registra las suyas. Recepcion y admin: ven todas y pueden
+    registrar a nombre de alguien que llega sin cuenta. Por defecto no se listan
+    las cerradas, que es como se mira una guardia en curso; `?todas=1` las trae.
+    """
+
+    serializer_class = UrgenciaSerializer
+    # La guardia la maneja recepcion; un medico no entra por aca (atiende la
+    # consulta ya derivada como un turno normal).
+    permission_classes = [IsRecepcionOAdmin | IsPatient]
+    pagination_class = None
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = Urgencia.objects.select_related(
+            "paciente", "especialidad", "medico__user", "registrada_por"
+        )
+
+        es_staff = user.is_superuser or user.rol in {Role.RECEPCION, Role.ADMIN}
+        if not es_staff:
+            qs = qs.filter(paciente=user)
+
+        estado = self.request.query_params.get("estado")
+        if estado:
+            # Antes un estado inexistente devolvia [] y la pantalla parecia
+            # vacia; ahora el front recibe el motivo y puede avisar.
+            if estado not in Urgencia.Estado.values:
+                raise ValidationError(
+                    {
+                        "estado": (
+                            "Estado invalido. Valores validos: "
+                            f"{', '.join(Urgencia.Estado.values)}."
+                        )
+                    }
+                )
+            qs = qs.filter(estado=estado)
+        elif self.request.query_params.get("todas") != "1":
+            qs = qs.exclude(estado=Urgencia.Estado.CERRADA)
+
+        return qs
+
+    def post(self, request):
+        serializer = UrgenciaCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        user = request.user
+        es_staff = user.is_superuser or user.rol in {Role.RECEPCION, Role.ADMIN}
+
+        if es_staff:
+            # La recepcion tiene que decir a quien le registra la urgencia; un
+            # paciente no, porque es él mismo y la view lo fuerza abajo.
+            if not serializer.validated_data.get("paciente"):
+                return Response(
+                    {"paciente": ["Elegí el paciente de la urgencia."]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            urgencia = serializer.save(registrada_por=user)
+        else:
+            # El triaje es una decisión clínica. Un paciente puede describir lo
+            # que siente, pero no asignarse prioridad urgente/emergencia.
+            if "triaje" in request.data:
+                return Response(
+                    {"triaje": ["Solo el personal de la clínica puede clasificar una urgencia."]},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            urgencia = serializer.save(
+                registrada_por=user,
+                paciente=user,
+                triaje=Urgencia.Triaje.NO_URGENTE,
+            )
+
+        return Response(UrgenciaSerializer(urgencia).data, status=status.HTTP_201_CREATED)
+
+
+class UrgenciaDetailView(APIView):
+    """
+    Ver y cambiar el estado de una urgencia.
+
+    La ve el paciente dueño y la guardia; cualquier otro recibe 404 y no 403,
+    para no confirmar que el id existe (igual que en `Turno`).
+    """
+
+    permission_classes = [IsRecepcionOAdmin | IsPatient]
+
+    def get_urgencia(self, request, pk):
+        urgencia = get_object_or_404(
+            Urgencia.objects.select_related(
+                "paciente", "especialidad", "medico__user", "registrada_por"
+            ),
+            pk=pk,
+        )
+        user = request.user
+        es_suyo = urgencia.paciente_id == user.id
+        es_staff = user.is_superuser or user.rol in {Role.RECEPCION, Role.ADMIN}
+
+        if not (es_suyo or es_staff):
+            return None, Response(
+                {"detalle": "Esa urgencia no existe."}, status=status.HTTP_404_NOT_FOUND
+            )
+        return urgencia, None
+
+    def get(self, request, pk):
+        urgencia, error = self.get_urgencia(request, pk)
+        if error:
+            return error
+        return Response(UrgenciaSerializer(urgencia).data)
+
+    def patch(self, request, pk):
+        urgencia, error = self.get_urgencia(request, pk)
+        if error:
+            return error
+
+        serializer = UrgenciaEstadoSerializer(
+            data=request.data,
+            context={"urgencia": urgencia, "user": request.user},
+        )
+        serializer.is_valid(raise_exception=True)
+        nuevo = serializer.validated_data["estado"]
+
+        user = request.user
+        es_staff = user.is_superuser or user.rol in {Role.RECEPCION, Role.ADMIN}
+        # El paciente solo puede cerrar la suya (darse por atendido); mover una
+        # urgencia a "en atencion" o "derivada" es decision de la guardia.
+        if not es_staff and nuevo != Urgencia.Estado.CERRADA:
+            return Response(
+                {"detalle": "Tu rol no puede pasar esta urgencia a ese estado."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        urgencia.estado = nuevo
+        campos = ["estado", "actualizada"]
+
+        # El triaje solo lo reclasifica la guardia: es una decision clinica.
+        if es_staff and "triaje" in serializer.validated_data:
+            urgencia.triaje = serializer.validated_data["triaje"]
+            campos.append("triaje")
+
+        if nuevo == Urgencia.Estado.CERRADA and urgencia.cerrada_en is None:
+            urgencia.cerrada_en = timezone.now()
+            campos.append("cerrada_en")
+
+        urgencia.save(update_fields=campos)
+        return Response(UrgenciaSerializer(urgencia).data)
+
+
+class UrgenciaDerivarView(APIView):
+    """
+    Convierte una urgencia en un turno con un profesional.
+
+    Es la "preparacion de la consulta": la guardia decide que el paciente tiene
+    que ver a alguien y le deja el turno ya reservado. Va en un endpoint propio y
+    en una transaccion por el mismo motivo que `ColaAgendarView`: si se creara el
+    turno y fallara el enlace, quedaria una consulta dando vueltas sin episodio.
+    """
+
+    permission_classes = [IsRecepcionOAdmin]
+
+    def post(self, request, pk):
+        urgencia = get_object_or_404(
+            Urgencia.objects.select_related("paciente", "especialidad"),
+            pk=pk,
+        )
+
+        if urgencia.estado in {Urgencia.Estado.DERIVADA, Urgencia.Estado.CERRADA}:
+            return Response(
+                {"detalle": "Esta urgencia ya esta derivada o cerrada."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        serializer = UrgenciaDerivarSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        medico = serializer.validated_data["medico"]
+        inicio = serializer.validated_data["inicio"]
+        duracion = services.duracion_de(medico)
+        fin = inicio + timedelta(minutes=duracion)
+
+        motivo = services.motivo_de_rechazo(medico, inicio, fin)
+        if motivo:
+            return Response({"detalle": motivo}, status=status.HTTP_409_CONFLICT)
+
+        from django.db import transaction
+
+        with transaction.atomic():
+            turno = Turno.objects.create(
+                paciente=urgencia.paciente,
+                medico=medico,
+                especialidad=medico.especialidad,
+                inicio=inicio,
+                fin=fin,
+                estado=Turno.Estado.CONFIRMADO,
+                motivo=(serializer.validated_data.get("motivo") or urgencia.motivo)[:200],
+                created_by=request.user,
+            )
+            urgencia.turno = turno
+            urgencia.medico = medico
+            campos = ["turno", "medico", "estado", "actualizada"]
+            if not urgencia.especialidad_id:
+                urgencia.especialidad = medico.especialidad
+                campos.append("especialidad")
+            urgencia.estado = Urgencia.Estado.DERIVADA
+            urgencia.save(update_fields=campos)
+
+        return Response(
+            {
+                "urgencia": UrgenciaSerializer(urgencia).data,
+                "turno": TurnoSerializer(turno).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 # ---------------------------------------------------------------------------

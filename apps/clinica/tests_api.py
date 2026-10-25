@@ -34,7 +34,9 @@ from apps.clinica.models import (
     Especialidad,
     FichaMedica,
     PerfilMedico,
+    PerfilPaciente,
     Turno,
+    Urgencia,
 )
 
 PASSWORD = "Clinica2026Segura"
@@ -406,6 +408,76 @@ class TestDisponibilidad(BaseClinica):
             reverse("clinica:disponibilidad"), {"fecha": "15/06/2026"}
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_devuelve_agenda_y_horarios_ocupados(self):
+        """La pantalla de medicos disponibles necesita ver que esta ocupado."""
+        self.turno_valido(
+            inicio=self.instante(time(10, 0)), fin=self.instante(time(10, 30))
+        )
+        response = self.como(self.paciente).get(
+            reverse("clinica:disponibilidad"),
+            {"medico": self.medico.id, "fecha": self.DIA.isoformat()},
+        )
+        self.assertEqual(response.status_code, 200)
+        medico = response.json()["medicos"][0]
+
+        self.assertEqual(len(medico["horarios_ocupados"]), 1)
+        ocupado = medico["horarios_ocupados"][0]
+        # Se comparan los relojes y no el string: el offset depende de la
+        # timezone del entorno y no es lo que este test quiere fijar.
+        desde = datetime.fromisoformat(ocupado["inicio"])
+        hasta = datetime.fromisoformat(ocupado["fin"])
+        self.assertEqual((desde.hour, desde.minute), (10, 0))
+        self.assertEqual((hasta.hour, hasta.minute), (10, 30))
+
+        self.assertEqual(len(medico["agenda"]), 1)
+        self.assertEqual(medico["agenda"][0]["hora_inicio"], "09:00")
+        self.assertEqual(medico["agenda"][0]["hora_fin"], "13:00")
+
+
+class TestValidarDisponibilidad(BaseClinica):
+    """Chequeo previo a reservar: no crea turno, solo informa."""
+
+    def validar(self, inicio, medico=None, user=None):
+        return self.como(user or self.paciente).get(
+            reverse("clinica:disponibilidad-validar"),
+            {"medico": (medico or self.medico).id, "inicio": inicio.isoformat()},
+        )
+
+    def test_horario_libre_es_disponible(self):
+        response = self.validar(self.futuro_en_agenda(11))
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["disponible"])
+        self.assertIsNone(response.json()["motivo"])
+
+    def test_horario_ocupado_informa_el_motivo(self):
+        inicio = self.futuro_en_agenda(11)
+        self.turno_valido(inicio=inicio, fin=inicio + timedelta(minutes=30))
+        response = self.validar(inicio)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["disponible"])
+        self.assertIn("turno", response.json()["motivo"])
+
+    def test_fuera_de_agenda_no_esta_disponible(self):
+        response = self.validar(self.futuro_en_agenda(23))
+        self.assertFalse(response.json()["disponible"])
+        self.assertIn("agenda", response.json()["motivo"])
+
+    def test_horario_pasado_no_esta_disponible(self):
+        response = self.validar(timezone.now() - timedelta(days=1))
+        self.assertFalse(response.json()["disponible"])
+        self.assertIn("futuro", response.json()["motivo"])
+
+    def test_medico_inexistente_da_400(self):
+        response = self.como(self.paciente).get(
+            reverse("clinica:disponibilidad-validar"),
+            {"medico": 999999, "inicio": self.futuro_en_agenda(11).isoformat()},
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_recepcion_tambien_puede_validar(self):
+        response = self.validar(self.futuro_en_agenda(11), user=self.recepcion)
+        self.assertEqual(response.status_code, 200)
 
 
 # ---------------------------------------------------------------------------
@@ -1178,3 +1250,296 @@ class TestListadoDeUsuarios(BaseClinica):
     def test_recepcion_no_lista_usuarios(self):
         response = self.como(self.recepcion).get(reverse("auth-usuarios"))
         self.assertEqual(response.status_code, 403)
+
+
+# ---------------------------------------------------------------------------
+# Urgencias
+# ---------------------------------------------------------------------------
+
+
+class TestUrgencias(BaseClinica):
+    """Guardia: registro, estados y derivacion a una consulta."""
+
+    def urgencia(self, **overrides):
+        data = {
+            "paciente": self.paciente,
+            "motivo": "Dolor de pecho",
+            "triaje": Urgencia.Triaje.URGENTE,
+            "estado": Urgencia.Estado.REGISTRADA,
+        }
+        data.update(overrides)
+        return Urgencia.objects.create(**data)
+
+    def test_paciente_registra_su_propia_urgencia(self):
+        response = self.como(self.paciente).post(
+            reverse("clinica:urgencia-lista"),
+            {"motivo": "Me caí", "triaje": 10},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["paciente"], "Ana Perez")
+        self.assertEqual(response.json()["estado"], "registrada")
+
+    def test_paciente_no_puede_registrar_para_otro(self):
+        """Aunque mande un `paciente`, la urgencia queda a su nombre."""
+        response = self.como(self.paciente).post(
+            reverse("clinica:urgencia-lista"),
+            {"paciente": str(self.otro_paciente.id), "motivo": "Fiebre"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(Urgencia.objects.get().paciente_id, self.paciente.id)
+
+    def test_recepcion_registra_para_un_paciente(self):
+        response = self.como(self.recepcion).post(
+            reverse("clinica:urgencia-lista"),
+            {"paciente": str(self.paciente.id), "motivo": "Se desmayó", "triaje": 20},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["triaje"], 20)
+
+    def test_recepcion_sin_paciente_da_400(self):
+        response = self.como(self.recepcion).post(
+            reverse("clinica:urgencia-lista"), {"motivo": "Algo"}, format="json"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_motivo_vacio_se_rechaza(self):
+        response = self.como(self.paciente).post(
+            reverse("clinica:urgencia-lista"), {"motivo": "   "}, format="json"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_por_defecto_no_lista_las_cerradas(self):
+        self.urgencia()
+        self.urgencia(estado=Urgencia.Estado.CERRADA, triaje=Urgencia.Triaje.NO_URGENTE)
+        response = self.como(self.recepcion).get(reverse("clinica:urgencia-lista"))
+        self.assertEqual(len(response.json()), 1)
+
+    def test_todas_incluye_las_cerradas(self):
+        self.urgencia()
+        self.urgencia(estado=Urgencia.Estado.CERRADA, triaje=Urgencia.Triaje.NO_URGENTE)
+        response = self.como(self.recepcion).get(
+            reverse("clinica:urgencia-lista"), {"todas": "1"}
+        )
+        self.assertEqual(len(response.json()), 2)
+
+    def test_paciente_solo_ve_las_suyas(self):
+        self.urgencia(estado=Urgencia.Estado.EN_ESPERA)
+        self.urgencia(paciente=self.otro_paciente)
+        response = self.como(self.paciente).get(reverse("clinica:urgencia-lista"))
+        self.assertEqual(len(response.json()), 1)
+
+    def test_recepcion_avanza_el_estado(self):
+        u = self.urgencia()
+        response = self.como(self.recepcion).patch(
+            reverse("clinica:urgencia-detalle", args=[u.id]),
+            {"estado": "en_atencion"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        u.refresh_from_db()
+        self.assertEqual(u.estado, Urgencia.Estado.EN_ATENCION)
+
+    def test_transicion_invalida_da_400(self):
+        u = self.urgencia()
+        response = self.como(self.recepcion).patch(
+            reverse("clinica:urgencia-detalle", args=[u.id]),
+            {"estado": "derivada"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_recepcion_reclasifica_el_triaje(self):
+        u = self.urgencia()
+        response = self.como(self.recepcion).patch(
+            reverse("clinica:urgencia-detalle", args=[u.id]),
+            {"estado": "en_espera", "triaje": 20},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        u.refresh_from_db()
+        self.assertEqual(u.triaje, Urgencia.Triaje.EMERGENCIA)
+
+    def test_paciente_solo_puede_cerrar_la_suya(self):
+        u = self.urgencia(estado=Urgencia.Estado.EN_ESPERA)
+        response = self.como(self.paciente).patch(
+            reverse("clinica:urgencia-detalle", args=[u.id]),
+            {"estado": "en_atencion"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_paciente_cierra_la_suya_y_queda_cerrada_en(self):
+        u = self.urgencia(estado=Urgencia.Estado.EN_ESPERA)
+        response = self.como(self.paciente).patch(
+            reverse("clinica:urgencia-detalle", args=[u.id]),
+            {"estado": "cerrada"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        u.refresh_from_db()
+        self.assertIsNotNone(u.cerrada_en)
+
+    def test_paciente_no_ve_la_urgencia_de_otro(self):
+        u = self.urgencia(paciente=self.otro_paciente)
+        response = self.como(self.paciente).get(
+            reverse("clinica:urgencia-detalle", args=[u.id])
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_el_medico_no_entra_al_modulo_de_urgencias(self):
+        response = self.como(self.medico_user).get(reverse("clinica:urgencia-lista"))
+        self.assertEqual(response.status_code, 403)
+
+    def test_recepcion_deriva_y_genera_el_turno(self):
+        u = self.urgencia(estado=Urgencia.Estado.EN_ATENCION)
+        response = self.como(self.recepcion).post(
+            reverse("clinica:urgencia-derivar", args=[u.id]),
+            {"medico": self.medico.id, "inicio": self.futuro_en_agenda(11).isoformat()},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+        u.refresh_from_db()
+        self.assertEqual(u.estado, Urgencia.Estado.DERIVADA)
+        self.assertIsNotNone(u.turno_id)
+        self.assertEqual(u.turno.paciente_id, u.paciente_id)
+
+    def test_derivar_a_horario_ocupado_da_409(self):
+        u = self.urgencia(estado=Urgencia.Estado.EN_ATENCION)
+        inicio = self.futuro_en_agenda(11)
+        self.turno_valido(inicio=inicio, fin=inicio + timedelta(minutes=30))
+        response = self.como(self.recepcion).post(
+            reverse("clinica:urgencia-derivar", args=[u.id]),
+            {"medico": self.medico.id, "inicio": inicio.isoformat()},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 409)
+
+    def test_paciente_no_deriva(self):
+        u = self.urgencia(estado=Urgencia.Estado.EN_ATENCION)
+        response = self.como(self.paciente).post(
+            reverse("clinica:urgencia-derivar", args=[u.id]),
+            {"medico": self.medico.id, "inicio": self.futuro_en_agenda(11).isoformat()},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_derivar_una_cerrada_da_409(self):
+        u = self.urgencia(estado=Urgencia.Estado.CERRADA)
+        response = self.como(self.recepcion).post(
+            reverse("clinica:urgencia-derivar", args=[u.id]),
+            {"medico": self.medico.id, "inicio": self.futuro_en_agenda(11).isoformat()},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 409)
+
+    # --- Datos del paciente en la urgencia ---
+
+    def test_detalle_incluye_los_datos_del_paciente(self):
+        PerfilPaciente.objects.create(
+            user=self.paciente,
+            documento="30111222",
+            fecha_nacimiento=date(1990, 5, 20),
+            direccion="Calle 1",
+            obra_social="OSDE",
+        )
+        u = self.urgencia()
+        response = self.como(self.recepcion).get(
+            reverse("clinica:urgencia-detalle", args=[u.id])
+        )
+        self.assertEqual(response.status_code, 200)
+        detalle = response.json()["paciente_detalle"]
+        self.assertEqual(detalle["nombre"], "Ana Perez")
+        self.assertEqual(detalle["documento"], "30111222")
+        self.assertEqual(detalle["fecha_nacimiento"], "1990-05-20")
+        self.assertEqual(detalle["direccion"], "Calle 1")
+        self.assertEqual(detalle["obra_social"], "OSDE")
+
+    def test_detalle_sin_perfil_no_rompe(self):
+        u = self.urgencia()
+        response = self.como(self.recepcion).get(
+            reverse("clinica:urgencia-detalle", args=[u.id])
+        )
+        detalle = response.json()["paciente_detalle"]
+        self.assertIsNone(detalle["documento"])
+        self.assertIsNone(detalle["fecha_nacimiento"])
+        self.assertEqual(detalle["direccion"], "")
+        self.assertEqual(detalle["obra_social"], "")
+
+    # --- Validaciones y mensajes de error ---
+
+    def test_listado_con_estado_invalido_da_400(self):
+        response = self.como(self.recepcion).get(
+            reverse("clinica:urgencia-lista"), {"estado": "volando"}
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("estado", response.json()["errors"])
+
+    def test_falta_motivo_da_400_con_mensaje(self):
+        response = self.como(self.paciente).post(
+            reverse("clinica:urgencia-lista"), {}, format="json"
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("motivo", response.json()["errors"])
+
+    def test_triaje_invalido_da_400(self):
+        response = self.como(self.paciente).post(
+            reverse("clinica:urgencia-lista"),
+            {"motivo": "Fiebre", "triaje": 99},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("triaje", response.json()["errors"])
+
+    def test_paciente_no_puede_cambiar_el_triaje(self):
+        u = self.urgencia(estado=Urgencia.Estado.EN_ESPERA)
+        response = self.como(self.paciente).patch(
+            reverse("clinica:urgencia-detalle", args=[u.id]),
+            {"estado": "cerrada", "triaje": 20},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("triaje", response.json()["errors"])
+
+    def test_transicion_invalida_informa_los_estados_validos(self):
+        u = self.urgencia()  # registrada
+        response = self.como(self.recepcion).patch(
+            reverse("clinica:urgencia-detalle", args=[u.id]),
+            {"estado": "derivada"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            "Estados validos desde aca", response.json()["errors"]["estado"][0]
+        )
+
+    def test_derivar_sin_medico_da_400(self):
+        u = self.urgencia(estado=Urgencia.Estado.EN_ATENCION)
+        response = self.como(self.recepcion).post(
+            reverse("clinica:urgencia-derivar", args=[u.id]),
+            {"inicio": self.futuro_en_agenda(11).isoformat()},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("medico", response.json()["errors"])
+
+    def test_derivar_sin_inicio_da_400(self):
+        u = self.urgencia(estado=Urgencia.Estado.EN_ATENCION)
+        response = self.como(self.recepcion).post(
+            reverse("clinica:urgencia-derivar", args=[u.id]),
+            {"medico": self.medico.id},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("inicio", response.json()["errors"])
+
+    def test_observaciones_demasiado_largas_dan_400(self):
+        response = self.como(self.paciente).post(
+            reverse("clinica:urgencia-lista"),
+            {"motivo": "Fiebre", "observaciones": "x" * 2001},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("observaciones", response.json()["errors"])

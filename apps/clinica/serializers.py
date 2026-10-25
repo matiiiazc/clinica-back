@@ -36,6 +36,7 @@ from .models import (
     FichaMedica,
     PerfilMedico,
     Turno,
+    Urgencia,
 )
 
 User = get_user_model()
@@ -185,6 +186,19 @@ class BloqueoSerializer(serializers.ModelSerializer):
                 {"hasta": "La fecha de fin no puede ser anterior a la de inicio."}
             )
         return attrs
+
+
+class ValidarDisponibilidadSerializer(serializers.Serializer):
+    """
+    Datos minimos para preguntar si un horario se puede reservar.
+
+    Se valida con los mismos campos que despues usa el alta del turno: si aca se
+    aceptara un `medico` inexistente, la respuesta seria un 500 en vez del 400
+    que espera la pantalla.
+    """
+
+    medico = serializers.PrimaryKeyRelatedField(queryset=PerfilMedico.objects.all())
+    inicio = serializers.DateTimeField()
 
 
 # ---------------------------------------------------------------------------
@@ -464,10 +478,17 @@ class ColaEsperaCreateSerializer(serializers.ModelSerializer):
     cardiologo" y la recepcion decide a quien le toca.
     """
 
+    paciente = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.filter(rol=Role.PACIENTE), required=False, write_only=True
+    )
+    prioridad = serializers.ChoiceField(
+        choices=ColaEspera.Prioridad.choices, required=False
+    )
+    nota = serializers.CharField(required=False, allow_blank=True, max_length=200)
+
     class Meta:
         model = ColaEspera
-        fields = ("especialidad", "medico", "prioridad", "desde", "hasta", "nota")
-        read_only_fields = ("prioridad",)
+        fields = ("paciente", "especialidad", "medico", "prioridad", "desde", "hasta", "nota")
 
     def validate(self, attrs):
         # El unico escenario que la base no puede covering: el paciente en
@@ -483,6 +504,14 @@ class ColaEsperaCreateSerializer(serializers.ModelSerializer):
                         "elegida."
                     )
                 }
+            )
+        if (
+            attrs.get("prioridad", ColaEspera.Prioridad.NORMAL)
+            == ColaEspera.Prioridad.URGENTE
+            and len((attrs.get("nota") or "").strip()) < 5
+        ):
+            raise serializers.ValidationError(
+                {"nota": "El motivo de la urgencia debe tener entre 5 y 200 caracteres."}
             )
         return attrs
 
@@ -643,3 +672,254 @@ class MedicoCreateSerializer(serializers.Serializer):
             user.is_staff = False
             user.save(update_fields=["rol", "is_staff"])
         return perfil
+
+
+# ---------------------------------------------------------------------------
+# Urgencias
+# ---------------------------------------------------------------------------
+
+
+class UrgenciaSerializer(serializers.ModelSerializer):
+    """
+    Lectura de una urgencia, con todo lo que la pantalla necesita ya aplanado.
+
+    `posibles_estados` sale de la tabla de transiciones del modelo, no del front:
+    los botones de la guardia tienen que ser los mismos estados que el backend va
+    a aceptar, y hardcodearlos es como se llega a un boton que devuelve 400.
+    """
+
+    paciente = serializers.SerializerMethodField()
+    # UUIDField y no IntegerField: el pk de User es un UUID (ver TurnoSerializer).
+    paciente_id = serializers.UUIDField(read_only=True)
+    paciente_detalle = serializers.SerializerMethodField()
+    especialidad = serializers.SerializerMethodField()
+    especialidad_id = serializers.IntegerField(read_only=True)
+    medico = serializers.SerializerMethodField()
+    medico_id = serializers.IntegerField(read_only=True)
+    triaje_display = serializers.CharField(source="get_triaje_display", read_only=True)
+    estado = serializers.CharField(read_only=True)
+    posibles_estados = serializers.SerializerMethodField()
+    registrada_por = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Urgencia
+        fields = (
+            "id",
+            "paciente",
+            "paciente_id",
+            "paciente_detalle",
+            "motivo",
+            "triaje",
+            "triaje_display",
+            "estado",
+            "especialidad",
+            "especialidad_id",
+            "medico",
+            "medico_id",
+            "observaciones",
+            "turno",
+            "posibles_estados",
+            "registrada_por",
+            "creada",
+            "actualizada",
+            "cerrada_en",
+        )
+
+    def get_paciente(self, obj):
+        return obj.paciente.get_full_name() or obj.paciente.email
+
+    def get_paciente_detalle(self, obj):
+        """
+        Datos de contacto y del perfil que la guardia necesita al abrir una
+        urgencia. `perfil_paciente` es un OneToOne y puede no existir: el alta
+        publica lo crea, pero una cuenta vieja o de demo puede no tenerlo. El
+        `getattr` devuelve None en ese caso (RelatedObjectDoesNotExist hereda de
+        AttributeError) y la pantalla muestra los campos vacios.
+        """
+        user = obj.paciente
+        perfil = getattr(user, "perfil_paciente", None)
+        return {
+            "id": str(user.id),
+            "nombre": user.get_full_name() or user.email,
+            "email": user.email,
+            "telefono": user.telefono,
+            "email_verificado": user.email_verified,
+            "documento": perfil.documento if perfil else None,
+            "fecha_nacimiento": (
+                perfil.fecha_nacimiento.isoformat()
+                if perfil and perfil.fecha_nacimiento
+                else None
+            ),
+            "direccion": perfil.direccion if perfil else "",
+            "obra_social": perfil.obra_social if perfil else "",
+        }
+
+    def get_especialidad(self, obj):
+        # MethodField y no `source` porque `especialidad` es opcional: en la
+        # guardia se registra antes de saber el destino y el campo llega vacio.
+        if not obj.especialidad_id:
+            return None
+        return obj.especialidad.nombre
+
+    def get_medico(self, obj):
+        if not obj.medico_id:
+            return None
+        return obj.medico.user.get_full_name() or obj.medico.user.email
+
+    def get_posibles_estados(self, obj):
+        return sorted(obj.TRANSICIONES.get(obj.estado, set()))
+
+    def get_registrada_por(self, obj):
+        if not obj.registrada_por:
+            return None
+        return obj.registrada_por.get_full_name() or obj.registrada_por.email
+
+
+class UrgenciaCreateSerializer(serializers.ModelSerializer):
+    """
+    Alta de urgencia.
+
+    El `paciente` se acepta pero no es obligatorio: la recepcion registra a
+    alguien que no esta usando el sistema, y en ese caso lo manda por id. Un
+    paciente que se registra a si mismo no lo manda: la view le pone el suyo y
+    descarta cualquier valor que venga, para que nadie registre una urgencia a
+    nombre de otro.
+    """
+
+    paciente = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.filter(rol=Role.PACIENTE), required=False
+    )
+
+    class Meta:
+        model = Urgencia
+        fields = ("paciente", "motivo", "triaje", "especialidad", "medico", "observaciones")
+        extra_kwargs = {
+            "motivo": {
+                "error_messages": {
+                    "required": "Conta que esta pasando antes de registrar.",
+                    "blank": "Conta que esta pasando antes de registrar.",
+                }
+            },
+            "triaje": {
+                "error_messages": {
+                    "invalid_choice": (
+                        "El triaje tiene que ser 0 (no urgente), 10 (urgente) "
+                        "o 20 (emergencia)."
+                    )
+                }
+            },
+        }
+
+    def validate_motivo(self, value):
+        # `value` no es None aca: el campo es obligatorio y DRF ya rechazo el
+        # faltante con el mensaje de `extra_kwargs`.
+        if not value.strip():
+            raise serializers.ValidationError("Conta que esta pasando antes de registrar.")
+        return value.strip()
+
+    def validate_observaciones(self, value):
+        # El modelo es TextField y no tiene tope; se acota en la API para que un
+        # cliente no pueda guardar un texto arbitrariamente grande.
+        value = (value or "").strip()
+        if len(value) > 2000:
+            raise serializers.ValidationError(
+                "Las observaciones no pueden superar los 2000 caracteres."
+            )
+        return value
+
+    def validate(self, attrs):
+        # Mismo chequeo que en la cola: un `medico` de otra especialidad seria
+        # una derivacion imposible de atender.
+        medico = attrs.get("medico")
+        especialidad = attrs.get("especialidad")
+        if medico and especialidad and medico.especialidad_id != especialidad.id:
+            raise serializers.ValidationError(
+                {"medico": "Ese profesional no pertenece a la especialidad elegida."}
+            )
+        return attrs
+
+
+class UrgenciaEstadoSerializer(serializers.Serializer):
+    """Cambio de estado (y opcionalmente de triaje) validado contra las transiciones."""
+
+    estado = serializers.ChoiceField(
+        choices=Urgencia.Estado.choices,
+        error_messages={
+            "required": "Indica el estado al que queres pasar la urgencia.",
+            "invalid_choice": "Ese estado no existe.",
+        },
+    )
+    triaje = serializers.ChoiceField(
+        choices=Urgencia.Triaje.choices,
+        required=False,
+        error_messages={
+            "invalid_choice": (
+                "El triaje tiene que ser 0 (no urgente), 10 (urgente) o 20 (emergencia)."
+            )
+        },
+    )
+
+    def validate(self, attrs):
+        urgencia = self.context["urgencia"]
+        nuevo = attrs["estado"]
+
+        # El paciente solo puede cerrar la suya; si ademas manda un triaje, se
+        # rechaza en vez de ignorarlo, para que no crea que lo cambio.
+        if "triaje" in attrs:
+            user = self.context.get("user")
+            es_staff = bool(
+                user and (user.is_superuser or user.rol in {Role.RECEPCION, Role.ADMIN})
+            )
+            if not es_staff:
+                raise serializers.ValidationError(
+                    {"triaje": "Solo la guardia puede cambiar el triaje."}
+                )
+        if nuevo == urgencia.estado:
+            raise serializers.ValidationError(
+                {"estado": f"La urgencia ya esta en estado {urgencia.get_estado_display().lower()}."}
+            )
+        if not urgencia.puede_transicionar_a(nuevo):
+            permitidos = ", ".join(
+                Urgencia.Estado(valor).label.lower()
+                for valor in sorted(urgencia.TRANSICIONES.get(urgencia.estado, set()))
+            )
+            raise serializers.ValidationError(
+                {
+                    "estado": (
+                        f"No se puede pasar de {urgencia.get_estado_display().lower()} a "
+                        f"{Urgencia.Estado(nuevo).label.lower()}. "
+                        f"Estados validos desde aca: {permitidos or 'ninguno'}."
+                    )
+                }
+            )
+        return attrs
+
+
+class UrgenciaDerivarSerializer(serializers.Serializer):
+    """
+    Derivacion de una urgencia a un turno ("preparar la consulta").
+
+    Se pide el profesional y el horario porque la guardia no reserva el primero
+    que aparezca: si el paciente ya vio a alguien, se lo agenda con ese.
+    """
+
+    medico = serializers.PrimaryKeyRelatedField(
+        queryset=PerfilMedico.objects.all(),
+        error_messages={
+            "required": "Elegi el profesional para la consulta.",
+            "does_not_exist": "Ese profesional no existe.",
+            "incorrect_type": "El profesional tiene que ser un id numerico.",
+        },
+    )
+    inicio = serializers.DateTimeField(
+        error_messages={
+            "required": "Indica el horario de la consulta.",
+            "invalid": "El horario no tiene un formato valido.",
+        }
+    )
+    motivo = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_inicio(self, value):
+        if value <= timezone.localtime():
+            raise serializers.ValidationError("El horario tiene que ser futuro.")
+        return value

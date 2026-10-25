@@ -20,7 +20,7 @@ DEV_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
 
 def _is_dev_backend():
-    return settings.MAILERS["default"]["BACKEND"] == DEV_BACKEND
+    return settings.DEBUG and settings.MAILERS["default"]["BACKEND"] == DEV_BACKEND
 
 
 def _deliver(to, subject, template, context):

@@ -45,6 +45,11 @@ urlpatterns = [
     ),
     # --- Disponibilidad ---
     path("disponibilidad", views.DisponibilidadView.as_view(), name="disponibilidad"),
+    path(
+        "disponibilidad/validar",
+        views.DisponibilidadValidarView.as_view(),
+        name="disponibilidad-validar",
+    ),
     # --- Turnos ---
     path("turnos", views.TurnoListView.as_view(), name="turno-lista"),
     path("turnos/mios", views.MisTurnosView.as_view(), name="turno-mios"),
@@ -66,6 +71,14 @@ urlpatterns = [
         name="cola-prioridad",
     ),
     path("cola/<int:pk>/agendar", views.ColaAgendarView.as_view(), name="cola-agendar"),
+    # --- Urgencias ---
+    path("urgencias", views.UrgenciaListView.as_view(), name="urgencia-lista"),
+    path("urgencias/<int:pk>", views.UrgenciaDetailView.as_view(), name="urgencia-detalle"),
+    path(
+        "urgencias/<int:pk>/derivar",
+        views.UrgenciaDerivarView.as_view(),
+        name="urgencia-derivar",
+    ),
     # --- Ficha medica ---
     path("ficha", views.MiFichaView.as_view(), name="ficha-mia"),
     # Busqueda de pacientes: le devuelve a recepcion el UUID que necesita para

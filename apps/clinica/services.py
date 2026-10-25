@@ -108,6 +108,23 @@ def slots_libres(medico, fecha, duracion_minutos=None):
     return sorted(libres)
 
 
+def rangos_ocupados(medico, fecha):
+    """
+    Rangos de los turnos que ocupan el dia, para mostrarlos como "ocupado".
+
+    Se devuelve el rango real (inicio, fin) y no los slots de 15 minutos que
+    tapa cada turno: la pantalla necesita decir "de 10:00 a 10:30", no tres
+    horarios parciales que confunden mas de lo que ayudan.
+    """
+    inicio_dia = _aware(fecha, time(0, 0))
+    fin_dia = inicio_dia + timedelta(days=1)
+    return list(
+        turnos_ocupan(medico, inicio_dia, fin_dia)
+        .values_list("inicio", "fin")
+        .order_by("inicio")
+    )
+
+
 def slot_libre(medico, inicio, duracion_minutos=None):
     """Si un horario concreto esta disponible para ese medico."""
     duracion = duracion_minutos or duracion_de(medico)
