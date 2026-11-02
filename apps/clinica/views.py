@@ -25,7 +25,6 @@ from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.exceptions import ValidationError
 from rest_framework.generics import ListAPIView
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -43,7 +42,6 @@ from .models import (
     FichaMedica,
     PerfilMedico,
     Turno,
-    Urgencia,
 )
 from .permissions import (
     IsMedico,
@@ -71,11 +69,7 @@ from .serializers import (
     TurnoEstadoSerializer,
     TurnoSerializer,
     TurnoSolicitarSerializer,
-    UrgenciaCreateSerializer,
     ValidarDisponibilidadSerializer,
-    UrgenciaDerivarSerializer,
-    UrgenciaEstadoSerializer,
-    UrgenciaSerializer,
 )
 
 
@@ -90,7 +84,6 @@ def rango_desde_hoy(dias=1):
     return hoy, hoy + timedelta(days=dias)
 
 
-# ---------------------------------------------------------------------------
 # Especialidades
 # ---------------------------------------------------------------------------
 
@@ -1074,224 +1067,6 @@ class PacienteFichaView(APIView):
 
 
 # ---------------------------------------------------------------------------
-# Urgencias
-# ---------------------------------------------------------------------------
-
-
-class UrgenciaListView(ListAPIView):
-    """
-    Guardia: registro y listado de urgencias.
-
-    Paciente: ve y registra las suyas. Recepcion y admin: ven todas y pueden
-    registrar a nombre de alguien que llega sin cuenta. Por defecto no se listan
-    las cerradas, que es como se mira una guardia en curso; `?todas=1` las trae.
-    """
-
-    serializer_class = UrgenciaSerializer
-    # La guardia la maneja recepcion; un medico no entra por aca (atiende la
-    # consulta ya derivada como un turno normal).
-    permission_classes = [IsRecepcionOAdmin | IsPatient]
-    pagination_class = None
-
-    def get_queryset(self):
-        user = self.request.user
-        qs = Urgencia.objects.select_related(
-            "paciente", "especialidad", "medico__user", "registrada_por"
-        )
-
-        es_staff = user.is_superuser or user.rol in {Role.RECEPCION, Role.ADMIN}
-        if not es_staff:
-            qs = qs.filter(paciente=user)
-
-        estado = self.request.query_params.get("estado")
-        if estado:
-            # Antes un estado inexistente devolvia [] y la pantalla parecia
-            # vacia; ahora el front recibe el motivo y puede avisar.
-            if estado not in Urgencia.Estado.values:
-                raise ValidationError(
-                    {
-                        "estado": (
-                            "Estado invalido. Valores validos: "
-                            f"{', '.join(Urgencia.Estado.values)}."
-                        )
-                    }
-                )
-            qs = qs.filter(estado=estado)
-        elif self.request.query_params.get("todas") != "1":
-            qs = qs.exclude(estado=Urgencia.Estado.CERRADA)
-
-        return qs
-
-    def post(self, request):
-        serializer = UrgenciaCreateSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        user = request.user
-        es_staff = user.is_superuser or user.rol in {Role.RECEPCION, Role.ADMIN}
-
-        if es_staff:
-            # La recepcion tiene que decir a quien le registra la urgencia; un
-            # paciente no, porque es él mismo y la view lo fuerza abajo.
-            if not serializer.validated_data.get("paciente"):
-                return Response(
-                    {"paciente": ["Elegí el paciente de la urgencia."]},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            urgencia = serializer.save(registrada_por=user)
-        else:
-            # El triaje es una decisión clínica. Un paciente puede describir lo
-            # que siente, pero no asignarse prioridad urgente/emergencia.
-            if "triaje" in request.data:
-                return Response(
-                    {"triaje": ["Solo el personal de la clínica puede clasificar una urgencia."]},
-                    status=status.HTTP_403_FORBIDDEN,
-                )
-            urgencia = serializer.save(
-                registrada_por=user,
-                paciente=user,
-                triaje=Urgencia.Triaje.NO_URGENTE,
-            )
-
-        return Response(UrgenciaSerializer(urgencia).data, status=status.HTTP_201_CREATED)
-
-
-class UrgenciaDetailView(APIView):
-    """
-    Ver y cambiar el estado de una urgencia.
-
-    La ve el paciente dueño y la guardia; cualquier otro recibe 404 y no 403,
-    para no confirmar que el id existe (igual que en `Turno`).
-    """
-
-    permission_classes = [IsRecepcionOAdmin | IsPatient]
-
-    def get_urgencia(self, request, pk):
-        urgencia = get_object_or_404(
-            Urgencia.objects.select_related(
-                "paciente", "especialidad", "medico__user", "registrada_por"
-            ),
-            pk=pk,
-        )
-        user = request.user
-        es_suyo = urgencia.paciente_id == user.id
-        es_staff = user.is_superuser or user.rol in {Role.RECEPCION, Role.ADMIN}
-
-        if not (es_suyo or es_staff):
-            return None, Response(
-                {"detalle": "Esa urgencia no existe."}, status=status.HTTP_404_NOT_FOUND
-            )
-        return urgencia, None
-
-    def get(self, request, pk):
-        urgencia, error = self.get_urgencia(request, pk)
-        if error:
-            return error
-        return Response(UrgenciaSerializer(urgencia).data)
-
-    def patch(self, request, pk):
-        urgencia, error = self.get_urgencia(request, pk)
-        if error:
-            return error
-
-        serializer = UrgenciaEstadoSerializer(
-            data=request.data,
-            context={"urgencia": urgencia, "user": request.user},
-        )
-        serializer.is_valid(raise_exception=True)
-        nuevo = serializer.validated_data["estado"]
-
-        user = request.user
-        es_staff = user.is_superuser or user.rol in {Role.RECEPCION, Role.ADMIN}
-        # El paciente solo puede cerrar la suya (darse por atendido); mover una
-        # urgencia a "en atencion" o "derivada" es decision de la guardia.
-        if not es_staff and nuevo != Urgencia.Estado.CERRADA:
-            return Response(
-                {"detalle": "Tu rol no puede pasar esta urgencia a ese estado."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        urgencia.estado = nuevo
-        campos = ["estado", "actualizada"]
-
-        # El triaje solo lo reclasifica la guardia: es una decision clinica.
-        if es_staff and "triaje" in serializer.validated_data:
-            urgencia.triaje = serializer.validated_data["triaje"]
-            campos.append("triaje")
-
-        if nuevo == Urgencia.Estado.CERRADA and urgencia.cerrada_en is None:
-            urgencia.cerrada_en = timezone.now()
-            campos.append("cerrada_en")
-
-        urgencia.save(update_fields=campos)
-        return Response(UrgenciaSerializer(urgencia).data)
-
-
-class UrgenciaDerivarView(APIView):
-    """
-    Convierte una urgencia en un turno con un profesional.
-
-    Es la "preparacion de la consulta": la guardia decide que el paciente tiene
-    que ver a alguien y le deja el turno ya reservado. Va en un endpoint propio y
-    en una transaccion por el mismo motivo que `ColaAgendarView`: si se creara el
-    turno y fallara el enlace, quedaria una consulta dando vueltas sin episodio.
-    """
-
-    permission_classes = [IsRecepcionOAdmin]
-
-    def post(self, request, pk):
-        urgencia = get_object_or_404(
-            Urgencia.objects.select_related("paciente", "especialidad"),
-            pk=pk,
-        )
-
-        if urgencia.estado in {Urgencia.Estado.DERIVADA, Urgencia.Estado.CERRADA}:
-            return Response(
-                {"detalle": "Esta urgencia ya esta derivada o cerrada."},
-                status=status.HTTP_409_CONFLICT,
-            )
-
-        serializer = UrgenciaDerivarSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        medico = serializer.validated_data["medico"]
-        inicio = serializer.validated_data["inicio"]
-        duracion = services.duracion_de(medico)
-        fin = inicio + timedelta(minutes=duracion)
-
-        motivo = services.motivo_de_rechazo(medico, inicio, fin)
-        if motivo:
-            return Response({"detalle": motivo}, status=status.HTTP_409_CONFLICT)
-
-        from django.db import transaction
-
-        with transaction.atomic():
-            turno = Turno.objects.create(
-                paciente=urgencia.paciente,
-                medico=medico,
-                especialidad=medico.especialidad,
-                inicio=inicio,
-                fin=fin,
-                estado=Turno.Estado.CONFIRMADO,
-                motivo=(serializer.validated_data.get("motivo") or urgencia.motivo)[:200],
-                created_by=request.user,
-            )
-            urgencia.turno = turno
-            urgencia.medico = medico
-            campos = ["turno", "medico", "estado", "actualizada"]
-            if not urgencia.especialidad_id:
-                urgencia.especialidad = medico.especialidad
-                campos.append("especialidad")
-            urgencia.estado = Urgencia.Estado.DERIVADA
-            urgencia.save(update_fields=campos)
-
-        return Response(
-            {
-                "urgencia": UrgenciaSerializer(urgencia).data,
-                "turno": TurnoSerializer(turno).data,
-            },
-            status=status.HTTP_201_CREATED,
-        )
-
 
 # ---------------------------------------------------------------------------
 # Resumen del panel
@@ -1299,13 +1074,7 @@ class UrgenciaDerivarView(APIView):
 
 
 class PanelResumenView(APIView):
-    """
-    Numeros de arranque de cada panel.
-
-    Existe para que cada panel muestre lo suyo sin pedir cinco endpoints: una
-    pantalla de cinco requests(o seis)(o seis) seis(o seis) es una pantalla que carga cinco veces.
-    El contenido depende del rol, y por eso no hay un unico recurso "resumen".
-    """
+    """Números de arranque de cada panel, agrupados por rol."""
 
     permission_classes = [IsStaffUser | IsPatient | IsAdminUser]
 
@@ -1329,7 +1098,6 @@ class PanelResumenView(APIView):
                     ).count(),
                 }
             )
-
         elif user.rol == Role.RECEPCION:
             resumen.update(
                 {
@@ -1348,7 +1116,6 @@ class PanelResumenView(APIView):
                     ).count(),
                 }
             )
-
         elif user.rol == Role.MEDICO:
             qs = Turno.objects.filter(medico__user=user, inicio__date=hoy)
             resumen.update(
@@ -1358,8 +1125,7 @@ class PanelResumenView(APIView):
                     "estado": getattr(getattr(user, "perfil_medico", None), "estado", None),
                 }
             )
-
-        else:  # paciente
+        else:
             ficha = getattr(user, "ficha_medica", None)
             resumen.update(
                 {

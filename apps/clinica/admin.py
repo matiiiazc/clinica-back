@@ -20,7 +20,6 @@ from .models import (
     FichaMedica,
     PerfilMedico,
     Turno,
-    Urgencia,
 )
 
 
@@ -122,34 +121,6 @@ class ConsultaRecepcionAdmin(admin.ModelAdmin):
     @admin.display(description="paciente", ordering="paciente__nombre")
     def paciente(self, obj):
         return obj.paciente.get_full_name() or obj.paciente.email
-
-
-@admin.register(Urgencia)
-class UrgenciaAdmin(admin.ModelAdmin):
-    """Guardia: registro de urgencias. El estado se maneja por la API, que valida."""
-
-    list_display = ("paciente_nombre", "triaje", "estado", "especialidad", "medico_nombre", "creada")
-    list_filter = ("estado", "triaje", "especialidad")
-    search_fields = ("paciente__email", "paciente__nombre", "motivo")
-    ordering = ("-triaje", "creada")
-    readonly_fields = ("estado", "creada", "actualizada", "cerrada_en")
-
-    def get_queryset(self, request):
-        return (
-            super()
-            .get_queryset(request)
-            .select_related("paciente", "especialidad", "medico__user")
-        )
-
-    @admin.display(description="paciente", ordering="paciente__nombre")
-    def paciente_nombre(self, obj):
-        return obj.paciente.get_full_name() or obj.paciente.email
-
-    @admin.display(description="medico", ordering="medico__user__nombre")
-    def medico_nombre(self, obj):
-        if not obj.medico:
-            return "—"
-        return obj.medico.user.get_full_name() or obj.medico.user.email
 
 
 @admin.register(ColaEspera)
