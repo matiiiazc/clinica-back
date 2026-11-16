@@ -73,6 +73,8 @@ urlpatterns = [
     path("cola/<int:pk>/agendar", views.ColaAgendarView.as_view(), name="cola-agendar"),
     # --- Ficha medica ---
     path("ficha", views.MiFichaView.as_view(), name="ficha-mia"),
+    # Historial clinico: ficha, turnos pasados y consultas en una sola vista.
+    path("historial-clinico", views.HistorialClinicoView.as_view(), name="historial-clinico"),
     # Busqueda de pacientes: le devuelve a recepcion el UUID que necesita para
     # `POST /api/turnos`.
     path("pacientes", views.PacienteBusquedaView.as_view(), name="paciente-busqueda"),

@@ -41,6 +41,7 @@ from .models import (
     Especialidad,
     FichaMedica,
     PerfilMedico,
+    PerfilPaciente,
     Turno,
 )
 from .permissions import (
@@ -70,6 +71,7 @@ from .serializers import (
     TurnoSerializer,
     TurnoSolicitarSerializer,
     ValidarDisponibilidadSerializer,
+    HistorialClinicoSerializer,
 )
 
 
@@ -1145,3 +1147,56 @@ class PanelResumenView(APIView):
             )
 
         return Response(resumen)
+
+
+# ---------------------------------------------------------------------------
+# Historial clinico
+# ---------------------------------------------------------------------------
+
+
+class HistorialClinicoView(APIView):
+    """
+    Historial clinico completo de un paciente.
+
+    Paciente: ve el suyo. Personal (recepcion, admin, medico): puede ver el de
+    cualquier paciente pasando `?paciente=<uuid>`.
+
+    Agrega en una sola respuesta: datos de la persona, ficha medica,
+    historial de turnos y consultas a recepcion.
+    """
+
+    permission_classes = [IsStaffUser | IsPatient | IsAdminUser]
+
+    def get(self, request):
+        user = request.user
+        es_staff = user.is_superuser or user.rol in {Role.RECEPCION, Role.ADMIN, Role.MEDICO}
+
+        paciente_id = request.query_params.get("paciente")
+        if paciente_id and es_staff:
+            paciente = get_object_or_404(User, pk=paciente_id, rol=Role.PACIENTE)
+        else:
+            paciente = user
+
+        ficha = None
+        try:
+            ficha = FichaMedica.objects.get(user=paciente)
+        except FichaMedica.DoesNotExist:
+            pass
+
+        turnos = (
+            Turno.objects.filter(paciente=paciente)
+            .select_related("medico__user", "especialidad")
+            .order_by("-inicio")
+        )
+
+        consultas = ConsultaRecepcion.objects.filter(paciente=paciente).order_by("-creada")
+
+        serializer = HistorialClinicoSerializer(
+            {
+                "paciente": paciente,
+                "ficha_medica": ficha,
+                "turnos": turnos,
+                "consultas": consultas,
+            }
+        )
+        return Response(serializer.data)

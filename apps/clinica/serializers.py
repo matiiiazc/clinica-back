@@ -35,6 +35,7 @@ from .models import (
     Especialidad,
     FichaMedica,
     PerfilMedico,
+    PerfilPaciente,
     Turno,
 )
 
@@ -674,3 +675,100 @@ class MedicoCreateSerializer(serializers.Serializer):
 
 
 # ---------------------------------------------------------------------------
+# Historial clinico
+# ---------------------------------------------------------------------------
+
+
+class TurnoHistorialSerializer(serializers.ModelSerializer):
+    """Un turno del historial: lo que importa ver despues de la consulta."""
+
+    medico = serializers.SerializerMethodField()
+    especialidad_nombre = serializers.CharField(source="especialidad.nombre", read_only=True)
+    estado_display = serializers.CharField(source="get_estado_display", read_only=True)
+
+    class Meta:
+        model = Turno
+        fields = (
+            "id",
+            "medico",
+            "especialidad_nombre",
+            "inicio",
+            "fin",
+            "estado",
+            "estado_display",
+            "motivo",
+            "notas",
+            "created_at",
+        )
+
+    def get_medico(self, obj):
+        if not obj.medico_id:
+            return None
+        return obj.medico.user.get_full_name() or obj.medico.user.email
+
+
+class ConsultaHistorialSerializer(serializers.ModelSerializer):
+    """Una consulta a recepcion, para el historial del paciente."""
+
+    respondida_por_nombre = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ConsultaRecepcion
+        fields = (
+            "id",
+            "mensaje",
+            "respuesta",
+            "estado",
+            "respondida_por_nombre",
+            "creada",
+            "respondida_en",
+        )
+
+    def get_respondida_por_nombre(self, obj):
+        if not obj.respondida_por_id:
+            return None
+        return obj.respondida_por.get_full_name() or obj.respondida_por.email
+
+
+class HistorialClinicoSerializer(serializers.Serializer):
+    """
+    Historial clinico completo de un paciente.
+
+    Agrega en una sola respuesta: datos de la persona, ficha medica, historial
+    de turnos y consultas a recepcion. El front lo consume como una pantalla
+    unica, sin andar armando el historial de a pedazos.
+    """
+
+    paciente = serializers.SerializerMethodField()
+    ficha_medica = serializers.SerializerMethodField()
+    turnos = TurnoHistorialSerializer(many=True, read_only=True)
+    consultas = ConsultaHistorialSerializer(many=True, read_only=True)
+
+    def get_paciente(self, obj):
+        user = obj["paciente"]
+        perfil = getattr(user, "perfil_paciente", None)
+        return {
+            "id": str(user.id),
+            "nombre": user.get_full_name() or user.email,
+            "email": user.email,
+            "telefono": user.telefono,
+            "rol": user.rol,
+        }
+
+    def get_ficha_medica(self, obj):
+        ficha = obj.get("ficha_medica")
+        if not ficha:
+            return None
+        return {
+            "alergias": ficha.alergias,
+            "enfermedades_cronicas": ficha.enfermedades_cronicas,
+            "medicacion": ficha.medicacion,
+            "observaciones": ficha.observaciones,
+            "verificada": ficha.verificada,
+            "verificada_por": ficha.verificada_por.get_full_name()
+            if ficha.verificada_por
+            else None,
+            "verificada_en": ficha.verificada_en,
+            "creado": ficha.creado,
+            "actualizado": ficha.actualizado,
+        }
