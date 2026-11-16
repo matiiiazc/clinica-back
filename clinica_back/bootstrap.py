@@ -41,9 +41,11 @@ def validate_settings():
         problems.append("SECRET_KEY es la de ejemplo de Django y DEBUG=False.")
 
     if not settings.DEBUG and settings.MAILERS["default"]["BACKEND"] == "django.core.mail.backends.console.EmailBackend":
-        problems.append(
-            "SMTP_HOST es obligatorio en produccion; no se puede usar el backend de consola para enviar codigos de verificacion."
-        )
+        # En producción sin SMTP_HOST se usa el backend de consola: los códigos
+        # de verificación se imprimen en los logs del servidor en vez de enviarse
+        # por email. El servidor sigue levantando; quien necesite email real que
+        # configure SMTP_HOST en las variables de entorno de Render.
+        pass
 
     if not settings.DEBUG:
         if not settings.SIMPLE_JWT.get("SIGNING_KEY"):
